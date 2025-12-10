@@ -144,21 +144,16 @@ logger = logging.getLogger(__name__)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import necessary models and data loaders
-try:
-    from load.supervised.benchmark_loader import load_benchmark_supervised
-    # Import model classes
-    from model.supervised.models import (
-        MLPClassifier, 
-        LSTMClassifier, 
-        ResNet18Classifier, 
-        TransformerClassifier, 
-        ViTClassifier,
-        PatchTST,
-        TimesFormer1D
-    )
-except ImportError as e:
-    logger.error(f"Import failed: {e}")
-    sys.exit(1)
+from load.supervised.benchmark_loader import load_benchmark_supervised
+from model.supervised.models import (
+    MLPClassifier,
+    LSTMClassifier,
+    ResNet18Classifier,
+    TransformerClassifier,
+    ViTClassifier,
+    PatchTST,
+    TimesFormer1D,
+)
 
 # Model factory dictionary
 MODEL_TYPES = {
