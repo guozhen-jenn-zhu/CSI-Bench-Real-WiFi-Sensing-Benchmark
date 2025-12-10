@@ -145,7 +145,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import necessary models and data loaders
 try:
-    from load.supervised.benchmark_loader import load_benchmark_supervised
+from load.supervised.benchmark_loader import load_benchmark_supervised
     # Import model classes
     from model.supervised.models import (
         MLPClassifier, 
@@ -154,7 +154,6 @@ try:
         TransformerClassifier, 
         ViTClassifier,
         PatchTST,
-        TimeSeriesTransformer,
         TimesFormer1D
     )
 except ImportError as e:

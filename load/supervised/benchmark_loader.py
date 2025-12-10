@@ -1,6 +1,6 @@
 import os
 from torch.utils.data import DataLoader
-from .benchmark_dataset import BenchmarkCSIDataset, load_benchmark_datasets
+from .benchmark_dataset import BenchmarkCSIDataset
 from ..supervised.label_utils import LabelMapper, create_label_mapper_from_metadata
 import torch
 
@@ -385,65 +385,3 @@ def load_benchmark_supervised(
         result['is_distributed'] = False
     
     return result
-
-def load_all_benchmarks(
-    dataset_root,
-    task_names=None,
-    batch_size=32,
-    transform=None,
-    target_transform=None,
-    file_format="h5",
-    data_column="file_path",
-    label_column="label",
-    data_key="CSI_amps",
-    num_workers=4,
-    shuffle_train=True,
-    distributed=False,
-    collate_fn=None
-):
-    """
-    Load all benchmark datasets.
-    
-    Args:
-        dataset_root: Root directory for all benchmarks.
-        task_names: List of task names to load. If None, loads all available tasks.
-        Other args: Same as load_benchmark_supervised.
-        distributed: Whether to configure data loaders for distributed training.
-        collate_fn: Custom collate function for DataLoader
-        
-    Returns:
-        Dictionary with data loaders for each task.
-    """
-    # If no task names provided, discover available tasks
-    if task_names is None:
-        task_names = []
-        for item in os.listdir(dataset_root):
-            task_dir = os.path.join(dataset_root, item)
-            if os.path.isdir(task_dir) and os.path.exists(os.path.join(task_dir, 'splits')):
-                task_names.append(item)
-    
-    # Load each benchmark
-    benchmarks = {}
-    for task_name in task_names:
-        try:
-            benchmark_data = load_benchmark_supervised(
-                dataset_root=dataset_root,
-                task_name=task_name,
-                batch_size=batch_size,
-                transform=transform,
-                target_transform=target_transform,
-                file_format=file_format,
-                data_column=data_column,
-                label_column=label_column,
-                data_key=data_key,
-                num_workers=num_workers,
-                shuffle_train=shuffle_train,
-                distributed=distributed,
-                collate_fn=collate_fn
-            )
-            benchmarks[task_name] = benchmark_data
-            print(f"Loaded benchmark '{task_name}' with {benchmark_data['num_classes']} classes")
-        except Exception as e:
-            print(f"Error loading benchmark '{task_name}': {str(e)}")
-    
-    return benchmarks
