@@ -332,11 +332,11 @@ Results and model artifacts will be stored in the S3 output location you specifi
 
 If you use this code in your research, please cite:
 ```
-@article{zhu2025csi,
-  title={CSI-Bench: A Large-Scale In-the-Wild Dataset for Multi-task WiFi Sensing},
-  author={Zhu, Guozhen and Hu, Yuqian and Gao, Weihang and Wang, Wei-Hsiang and Wang, Beibei and Liu, KJ},
-  journal={arXiv preprint arXiv:2505.21866},
-  year={2025}
+@inproceedings{zhu2025csibench,
+  title  = {{CSI-Bench}: A Large-Scale In-the-Wild Dataset for Multi-Task WiFi Sensing},
+  author = {Zhu, Guozhen and Hu, Yuqian and Gao, Weihang and Wang, Wei-Hsiang and Wang, Beibei and Liu, K. J. Ray},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year   = {2025}
 }
 ```
 
