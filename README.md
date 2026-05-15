@@ -332,14 +332,15 @@ Results and model artifacts will be stored in the S3 output location you specifi
 
 If you use this code in your research, please cite:
 ```
-@inproceedings{zhu2025csibench,
-  title  = {{CSI-Bench}: A Large-Scale In-the-Wild Dataset for Multi-Task WiFi Sensing},
-  author = {Zhu, Guozhen and Hu, Yuqian and Gao, Weihang and Wang, Wei-Hsiang and Wang, Beibei and Liu, K. J. Ray},
-  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
-  year   = {2025}
+@article{zhu2026csi,
+  title={CSI-Bench: A large-scale in-the-wild dataset for multi-task WiFi sensing},
+  author={Zhu, Guozhen and Hu, Yuqian and Gao, Weihang and Wang, Wei-Hsiang and Wang, Beibei and Liu, K},
+  journal={Advances in Neural Information Processing Systems},
+  volume={38},
+  year={2026}
 }
 ```
 
 ## License
 
-This project is licensed under Attribution-NonCommercial 4.0 International (CC BY-NC 4.0).
+This project is licensed under Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0).
