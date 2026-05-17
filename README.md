@@ -48,13 +48,10 @@ This repository provides a unified framework for training and evaluating deep le
   ```
   CSI-Bench/
   ├── Multitask/
-  ├── HumanActivityRecognition/
   ├── FallDetection/
   ├── BreathingDetection/
   ├── Localization/
-  ├── HumanIdentification/
   ├── MotionSourceRecognition/
-  ├── ProximityRecognition/
   └── RawContinuousRecording/
   ```
 
