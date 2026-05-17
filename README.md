@@ -43,18 +43,36 @@ This repository provides a unified framework for training and evaluating deep le
 
 3. Data Download:
 
-   Our full dataset will be released to public by camera ready deadline of NeurIPS 2025. For reviewers, please use the link in the paper manuscript to access our data through Kaggle. After downloaded the dataset, it should be in the following :
+   Please find the [CSI-Bench dataset](https://www.kaggle.com/datasets/guozhenjennzhu/csi-bench) hosted on Kaggle. We have recently updated the dataset. It is now organized as:
     
   ```
   CSI-Bench/
+  ├── Multitask/
   ├── HumanActivityRecognition/
   ├── FallDetection/
   ├── BreathingDetection/
   ├── Localization/
   ├── HumanIdentification/
   ├── MotionSourceRecognition/
-  └── ProximityRecognition/
+  ├── ProximityRecognition/
+  └── RawContinuousRecording/
   ```
+
+  The updated Multitask subset is organized by benchmark task, metadata/split files, and file format:
+
+  ```
+  Multitask/
+  ├── HumanActivityRecognition/
+  │   ├── splits/
+  │   └── metadata/
+  ├── ProximityRecognition/
+  │   ├── splits/
+  │   └── metadata/
+  ├── ...
+  ├── sub_Human_h5/
+  └── sub_Human_mat/
+  ```
+
   Each task directory follows a consistent structure:
   ```
   TaskName/
