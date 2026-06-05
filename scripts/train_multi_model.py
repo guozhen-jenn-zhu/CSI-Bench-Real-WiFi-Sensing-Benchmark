@@ -405,9 +405,11 @@ def get_args():
     # Convert models list to list
     args.all_models = [m.strip() for m in args.models.split(',')]
     
-    # Convert test splits to list
+    # Convert test splits to list.  ``'all'`` is left as a string sentinel so
+    # the benchmark loader can auto-discover every available test split (and
+    # filter out the ``_p<digit>`` few-shot-subset variants automatically).
     if args.test_splits == 'all':
-        args.test_splits = ['test_id', 'test_ood', 'test_cross_env']
+        args.test_splits = 'all'
     else:
         args.test_splits = [ts.strip() for ts in args.test_splits.split(',')]
     

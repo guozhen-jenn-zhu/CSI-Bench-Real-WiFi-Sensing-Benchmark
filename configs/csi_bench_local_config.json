@@ -1,0 +1,38 @@
+{
+  "pipeline": "supervised",
+  "training_dir": "~/Data/CSI-Bench/",
+  "output_dir": "./results/csi_bench",
+  "task": "FallDetection",
+  "available_tasks": [
+    "FallDetection",
+    "BreathingDetection",
+    "Localization",
+    "MotionSourceRecognition",
+    "HumanActivityRecognition",
+    "HumanIdentification",
+    "ProximityRecognition"
+  ],
+  "available_models": [
+    "mlp",
+    "lstm",
+    "resnet18",
+    "transformer",
+    "vit",
+    "patchtst",
+    "timesformer1d"
+  ],
+  "win_len": 500,
+  "feature_size": 232,
+  "seed": 42,
+  "seeds": [42],
+  "batch_size": 128,
+  "epochs": 100,
+  "learning_rate": 1e-3,
+  "weight_decay": 1e-5,
+  "warmup_epochs": 5,
+  "patience": 15,
+  "test_splits": "all",
+  "num_workers": 4,
+  "file_format": "h5",
+  "data_key": "CSI_amps"
+}

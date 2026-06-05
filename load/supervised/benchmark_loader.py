@@ -1,8 +1,34 @@
 import os
+import re
 from torch.utils.data import DataLoader
 from .benchmark_dataset import BenchmarkCSIDataset
 from ..supervised.label_utils import LabelMapper, create_label_mapper_from_metadata
 import torch
+
+
+# Splits whose names match any of these regexes belong to other tasks
+# (few-shot subset variants such as ``train_id_p5.json`` or ``p5_info.json``)
+# and must be ignored when auto-discovering test splits.
+_IGNORED_SPLIT_PATTERNS = (
+    re.compile(r"_p\d+$"),       # e.g. train_id_p5, test_id_p3
+    re.compile(r"^p\d+(_|$)"),    # e.g. p5_info, p5
+)
+
+
+def _is_ignored_split_name(name: str) -> bool:
+    """Return True if a split base-name (no .json) belongs to an ignored task."""
+    for pat in _IGNORED_SPLIT_PATTERNS:
+        if pat.search(name):
+            return True
+    return False
+
+
+# Tasks that live under the ``Multitask/`` parent in the new layout.
+_MULTITASK_TASKS = {
+    "HumanActivityRecognition",
+    "HumanIdentification",
+    "ProximityRecognition",
+}
 
 def load_benchmark_supervised(
     dataset_root,
@@ -81,13 +107,24 @@ def load_benchmark_supervised(
     
     # If not using root directory directly or root directory doesn't meet requirements
     if not use_root_as_task_dir:
-        # Try multiple directory structures to find the task directory
+        # Try multiple directory structures to find the task directory.
+        # The new ``CSI-Bench/`` layout does not use a ``tasks/`` prefix and
+        # places the multi-task tasks under a ``Multitask/`` parent directory.
         possible_paths = [
-            os.path.join(dataset_root, "tasks", task_name),              # dataset_root/tasks/task_name
-            os.path.join(dataset_root, task_name),                        # dataset_root/task_name
+            os.path.join(dataset_root, task_name),                        # dataset_root/task_name (new layout)
+            os.path.join(dataset_root, "Multitask", task_name),           # dataset_root/Multitask/task_name (new layout)
+            os.path.join(dataset_root, "tasks", task_name),              # dataset_root/tasks/task_name (legacy)
             os.path.join(dataset_root, task_name.lower()),                # dataset_root/task_name_lowercase
-            os.path.join(dataset_root, "tasks", task_name.lower())        # dataset_root/tasks/task_name_lowercase
+            os.path.join(dataset_root, "tasks", task_name.lower()),       # dataset_root/tasks/task_name_lowercase
         ]
+        # If the caller passes a ``Multitask/<name>`` style task_name, also try
+        # the trailing component directly (e.g. ``HumanActivityRecognition``).
+        if "/" in task_name or "\\" in task_name:
+            short_name = os.path.basename(task_name.replace("\\", "/"))
+            possible_paths.extend([
+                os.path.join(dataset_root, task_name),
+                os.path.join(dataset_root, short_name),
+            ])
         
         task_dir = None
         for path in possible_paths:
@@ -161,7 +198,11 @@ def load_benchmark_supervised(
             for file in os.listdir(splits_dir):
                 if file.startswith('test_') and file.endswith('.json'):
                     # Extract split name without .json extension
-                    split_name = file[:-5]  # Remove .json extension
+                    split_name = file[:-5]
+                    # Skip splits belonging to other (few-shot subset) tasks.
+                    if _is_ignored_split_name(split_name):
+                        print(f"  Ignoring split file (other task): {file}")
+                        continue
                     test_splits.append(split_name)
             print(f"Found {len(test_splits)} test splits: {test_splits}")
         

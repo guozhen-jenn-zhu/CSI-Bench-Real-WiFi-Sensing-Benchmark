@@ -79,10 +79,15 @@ def validate_config(config, required_fields=None):
     for field in required_fields:
         if field not in config:
             missing_fields.append(field)
-    
-    # Special handling for task and tasks parameters
-    if "task" not in config and "tasks" not in config:
-        missing_fields.append("task or tasks")
+
+    # Special handling for task and tasks parameters.  ``available_tasks`` is
+    # also accepted (the runner iterates over each task in turn).
+    if (
+        "task" not in config
+        and "tasks" not in config
+        and "available_tasks" not in config
+    ):
+        missing_fields.append("task or tasks or available_tasks")
     
     if missing_fields:
         print(f"Error: Configuration file is missing the following required parameters: {', '.join(missing_fields)}")
@@ -101,10 +106,14 @@ def validate_config(config, required_fields=None):
         return False
         
     # Special validation for supervised mode
-    if config["pipeline"] == "supervised" and "task" not in config:
-        print("Error: Supervised pipeline requires 'task' parameter")
+    if (
+        config["pipeline"] == "supervised"
+        and "task" not in config
+        and "available_tasks" not in config
+    ):
+        print("Error: Supervised pipeline requires 'task' or 'available_tasks' parameter")
         return False
-    
+
     return True
 
 # Load configuration from JSON file
@@ -418,8 +427,8 @@ def run_supervised_direct(config):
         cmd += f" --test_splits={quoted_test_splits}"
     
     # Add other model-specific parameters
-    important_params = ['learning_rate', 'weight_decay', 'warmup_epochs', 'patience', 
-                         'emb_dim', 'dropout', 'd_model']
+    important_params = ['learning_rate', 'weight_decay', 'warmup_epochs', 'patience',
+                         'emb_dim', 'dropout', 'd_model', 'seed']
     for param in important_params:
         if param in config:
             cmd += f" --{param}={config[param]}"
@@ -536,11 +545,16 @@ def run_multitask_direct(config):
         for key, value in model_params.items():
             cmd += f" --{key}={value}"
     else:
-        # If model_params doesn't exist, handle individual parameters
-        for param in ['lr', 'emb_dim', 'dropout', 'patience', 'data_key']:
+        # If model_params doesn't exist, handle individual parameters.
+        # ``train_multitask_adapter.py`` uses ``--lr``; if config supplies
+        # ``learning_rate`` we map it to ``--lr``.
+        for param in ['lr', 'emb_dim', 'dropout', 'patience', 'data_key', 'seed',
+                      'lora_r', 'lora_alpha', 'lora_dropout']:
             if param in config:
                 cmd += f" --{param}={config[param]}"
-    
+        if 'lr' not in config and 'learning_rate' in config:
+            cmd += f" --lr={config['learning_rate']}"
+
     # Add test_splits (if they exist)
     if 'test_splits' in config:
         test_splits = config['test_splits']
@@ -596,8 +610,9 @@ def main():
     # Parse command line arguments - only accept config_file
     parser = argparse.ArgumentParser(description='Run WiFi Sensing Pipeline')
     
-    # config_file is the only required parameter
-    parser.add_argument('--config_file', type=str, default=DEFAULT_CONFIG_PATH,
+    # config_file is the only required parameter (``--config`` is an alias)
+    parser.add_argument('--config_file', '--config', dest='config_file',
+                        type=str, default=DEFAULT_CONFIG_PATH,
                         help='JSON configuration file for all settings')
     
     args = parser.parse_args()
@@ -615,76 +630,98 @@ def main():
         print(f"Available options: {valid_pipelines}")
         return 1
     
-    # Set data directory environment variable
+    # Expand user paths (e.g. ``~/Data/CSI-Bench/``) before passing to children
     if 'training_dir' in config:
+        config['training_dir'] = os.path.expanduser(config['training_dir'])
         os.environ['WIFI_DATA_DIR'] = config['training_dir']
-    
+    if 'output_dir' in config:
+        config['output_dir'] = os.path.expanduser(config['output_dir'])
+
     # Get all available models
     available_models = config.get('available_models', [])
-    
-    # If no available models defined or empty list, use a default
     if not available_models:
         print("Warning: No available models specified in configuration. Using default model 'mlp'.")
         available_models = ['mlp']
-    
-    # Record results for all models
+
+    # Get list of seeds (single-seed sweep by default; multiple seeds opt-in).
+    seeds = config.get('seeds')
+    if seeds is None:
+        seeds = [config.get('seed', 42)]
+    if isinstance(seeds, str):
+        seeds = [int(s.strip()) for s in seeds.split(',') if s.strip()]
+    elif isinstance(seeds, int):
+        seeds = [seeds]
+    seeds = [int(s) for s in seeds]
+
+    # Get list of tasks for supervised mode (multitask consumes the ``tasks``
+    # key as one job and is not looped per-task here).
+    if pipeline == 'multitask':
+        task_list = [None]  # placeholder; multitask reads ``tasks`` directly
+    else:
+        task_list = config.get('available_tasks') or [config.get('task')]
+        task_list = [t for t in task_list if t]
+
+    # Record results across (task, model, seed)
     results = {}
-    
-    # Run each model in a loop
-    for model in available_models:
-        print(f"\n{'='*60}")
-        print(f"Starting training for model: {model}")
-        print(f"{'='*60}\n")
-        
-        # Create a new config copy for each model
-        model_config = config.copy()
-        model_config['model'] = model
-        
-        # Get specific pipeline configuration
-        if pipeline == 'multitask':
-            pipeline_config = get_multitask_config(model_config)
-        else:  # Default to supervised learning
-            pipeline_config = get_supervised_config(model_config)
-        
-        # Run appropriate pipeline
-        start_time = time.time()
-        if pipeline == 'multitask':
-            return_code = run_multitask_direct(pipeline_config)
-        else:  # Default to supervised learning
-            return_code = run_supervised_direct(pipeline_config)
-        
-        # Record results
-        end_time = time.time()
-        results[model] = {
-            'status': 'SUCCESS' if return_code == 0 else 'FAILED',
-            'return_code': return_code,
-            'run_time': end_time - start_time
-        }
-        
-        print(f"\nModel {model} training {'successful' if return_code == 0 else 'failed'}")
-        print(f"Running time: {(end_time - start_time)/60:.2f} minutes")
-    
-    # Print summary of all model runs
+
+    for task in task_list:
+        for model in available_models:
+            for seed in seeds:
+                if pipeline == 'multitask':
+                    key = f"multitask/{model}/seed{seed}"
+                else:
+                    key = f"{task}/{model}/seed{seed}"
+                print(f"\n{'='*60}")
+                print(f"Starting training: {key}")
+                print(f"{'='*60}\n")
+
+                # Create a new config copy for each (task, model, seed)
+                run_config = config.copy()
+                run_config['model'] = model
+                run_config['seed'] = seed
+                if pipeline != 'multitask' and task is not None:
+                    run_config['task'] = task
+
+                # Get specific pipeline configuration
+                if pipeline == 'multitask':
+                    pipeline_config = get_multitask_config(run_config)
+                else:
+                    pipeline_config = get_supervised_config(run_config)
+
+                # Run appropriate pipeline
+                start_time = time.time()
+                if pipeline == 'multitask':
+                    return_code = run_multitask_direct(pipeline_config)
+                else:
+                    return_code = run_supervised_direct(pipeline_config)
+                end_time = time.time()
+
+                results[key] = {
+                    'status': 'SUCCESS' if return_code == 0 else 'FAILED',
+                    'return_code': return_code,
+                    'run_time': end_time - start_time,
+                }
+                print(f"\n{key}: {'OK' if return_code == 0 else 'FAILED'} "
+                      f"({(end_time - start_time)/60:.2f} min)")
+
+    # Print summary of all runs
     print(f"\n{'='*60}")
-    print(f"All model training completed")
+    print(f"All training completed")
     print(f"{'='*60}")
     print(f"Results summary:")
-    
+
     successful = 0
     failed = 0
-    for model, result in results.items():
+    for key, result in results.items():
         status = result['status']
         run_time = result['run_time']
-        print(f"  - {model}: {status}, Running time: {run_time/60:.2f} minutes")
-        
+        print(f"  - {key}: {status}, time: {run_time/60:.2f} min")
         if status == 'SUCCESS':
             successful += 1
         else:
             failed += 1
-    
+
     print(f"\nSuccessful: {successful}/{len(results)}, Failed: {failed}/{len(results)}")
-    
-    # Return non-zero status code if any model failed
     return 0 if failed == 0 else 1
 
 if __name__ == "__main__":

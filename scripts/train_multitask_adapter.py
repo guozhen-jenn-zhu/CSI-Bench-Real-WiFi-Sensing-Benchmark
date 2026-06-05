@@ -131,20 +131,36 @@ def main():
     tasks = args.tasks.split(',')
     print(f"Training on {len(tasks)} tasks: {tasks}")
     
-    # Check for available test splits for each task
+    # Check for available test splits for each task.  Search the new
+    # ``CSI-Bench/<task>/`` and ``CSI-Bench/Multitask/<task>/`` layouts plus the
+    # legacy ``tasks/<task>/`` directory.
+    import re as _re
+    _ignore_pats = (_re.compile(r"_p\d+$"), _re.compile(r"^p\d+(_|$)"))
     available_test_splits = {}
     for task in tasks:
-        task_dir = os.path.join(args.data_dir, "tasks", task) if os.path.exists(os.path.join(args.data_dir, "tasks", task)) else os.path.join(args.data_dir, task)
+        candidate_task_dirs = [
+            os.path.join(args.data_dir, task),
+            os.path.join(args.data_dir, "Multitask", task),
+            os.path.join(args.data_dir, "tasks", task),
+            args.data_dir,
+        ]
+        task_dir = next(
+            (p for p in candidate_task_dirs if os.path.isdir(os.path.join(p, "splits"))),
+            candidate_task_dirs[0],
+        )
         splits_dir = os.path.join(task_dir, "splits")
         task_splits = []
-        
+
         if os.path.exists(splits_dir):
             for filename in os.listdir(splits_dir):
                 if filename.endswith(".json"):
                     split_name = filename.replace(".json", "")
+                    if any(p.search(split_name) for p in _ignore_pats):
+                        print(f"  Ignoring split file (other task): {filename}")
+                        continue
                     if split_name.startswith("test_") or split_name == "hard_cases":
                         task_splits.append(split_name)
-        
+
         available_test_splits[task] = task_splits
         print(f"Available test splits for task {task}: {task_splits}")
     
@@ -626,9 +642,12 @@ def main():
         config = {
             'model': args.model,
             'task': task,
+            'task_name': task,
+            'seed': args.seed,
             'batch_size': args.batch_size,
             'epochs': args.epochs,
             'lr': args.lr,
+            'learning_rate': args.lr,
             'lora_r': args.lora_r,
             'lora_alpha': args.lora_alpha,
             'lora_dropout': args.lora_dropout,

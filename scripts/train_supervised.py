@@ -159,9 +159,10 @@ def main(args=None):
     # Check if running in SageMaker
     is_sagemaker = os.path.exists('/opt/ml/model')
     
-    # Generate a unique experiment ID based only on parameters hash
-    # This way, same parameters will generate same experiment ID and overwrite previous results
-    param_str = f"{args.learning_rate}_{args.batch_size}_{args.epochs}_{args.weight_decay}_{args.warmup_epochs}_{args.win_len}_{args.feature_size}"
+    # Generate a unique experiment ID based on parameters hash.  The hash MUST
+    # include ``seed`` -- otherwise multi-seed sweeps collide into the same
+    # experiment directory and later seeds silently overwrite earlier ones.
+    param_str = f"{args.learning_rate}_{args.batch_size}_{args.epochs}_{args.weight_decay}_{args.warmup_epochs}_{args.win_len}_{args.feature_size}_seed{args.seed}"
     if hasattr(args, 'dropout') and args.dropout is not None:
         param_str += f"_{args.dropout}"
     if hasattr(args, 'emb_dim') and args.emb_dim is not None:
@@ -170,7 +171,7 @@ def main(args=None):
         param_str += f"_{args.d_model}"
     if hasattr(args, 'in_channels') and args.in_channels is not None:
         param_str += f"_{args.in_channels}"
-    
+
     experiment_id = f"params_{hashlib.md5(param_str.encode()).hexdigest()[:10]}"
     
     if is_sagemaker:
@@ -215,16 +216,33 @@ def main(args=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Check for available test splits in the dataset
-    task_dir = os.path.join(args.data_dir, "tasks", args.task_name) \
-        if os.path.exists(os.path.join(args.data_dir, "tasks", args.task_name)) else os.path.join(args.data_dir, args.task_name)
+    # Check for available test splits in the dataset.  Search the new
+    # ``CSI-Bench/<task>/`` and ``CSI-Bench/Multitask/<task>/`` layouts plus the
+    # legacy ``tasks/<task>/`` directory.
+    candidate_task_dirs = [
+        os.path.join(args.data_dir, args.task_name),
+        os.path.join(args.data_dir, "Multitask", args.task_name),
+        os.path.join(args.data_dir, "tasks", args.task_name),
+        args.data_dir,
+    ]
+    task_dir = next(
+        (p for p in candidate_task_dirs if os.path.isdir(os.path.join(p, "splits"))),
+        candidate_task_dirs[0],
+    )
     splits_dir = os.path.join(task_dir, "splits")
     available_test_splits = []
     print((f"********************splits_dir is {splits_dir}"))
+    # Filter out split files belonging to other (few-shot subset) tasks, e.g.
+    # ``train_id_p5.json``, ``test_id_p3.json``, ``p5_info.json``.
+    import re as _re
+    _ignore_pats = (_re.compile(r"_p\d+$"), _re.compile(r"^p\d+(_|$)"))
     if os.path.exists(splits_dir):
         for filename in os.listdir(splits_dir):
             if filename.endswith(".json"):
                 split_name = filename.replace(".json", "")
+                if any(p.search(split_name) for p in _ignore_pats):
+                    print(f"  Ignoring split file (other task): {filename}")
+                    continue
                 if split_name.startswith("test_") or split_name == "hard_cases":
                     available_test_splits.append(split_name)
     
@@ -380,6 +398,8 @@ def main(args=None):
     config = {
         'model': args.model,
         'task': args.task_name,
+        'task_name': args.task_name,
+        'seed': args.seed,
         'num_classes': num_classes,
         'batch_size': args.batch_size,
         'learning_rate': args.learning_rate,
@@ -444,26 +464,41 @@ def main(args=None):
     print("\nEvaluating on test splits:")
     all_results = {}
     for key, loader in test_loaders.items():
-        print(f"Evaluating on {key} split:")
+        # Skip splits with no samples (e.g. an empty difficulty tier).  We
+        # still record an entry so downstream aggregation knows the split
+        # existed and was empty for this (task, model, seed).
+        n_samples = len(loader.dataset) if loader is not None else 0
+        if n_samples == 0:
+            print(f"Skipping {key} split: 0 samples")
+            all_results[key] = {
+                'loss': None, 'accuracy': None, 'f1_score': None, 'n_samples': 0,
+            }
+            continue
+
+        print(f"Evaluating on {key} split ({n_samples} samples):")
         loss, accuracy = trainer.evaluate(loader)
         # Use calculate_metrics to get f1_score if available
         try:
             f1_score, _ = trainer.calculate_metrics(loader)
-        except:
-            f1_score = 0.0  # Default if not available
-            
+        except Exception as _e:
+            print(f"  [warn] calculate_metrics failed on {key}: {_e}")
+            f1_score = 0.0
+
         metrics = {
             'loss': loss,
             'accuracy': accuracy,
-            'f1_score': f1_score
+            'f1_score': f1_score,
+            'n_samples': n_samples,
         }
         all_results[key] = metrics
         print(f"{key} accuracy: {metrics['accuracy']:.4f}, F1-score: {metrics['f1_score']:.4f}")
-        
+
         # Generate confusion matrix
         print(f"Generating confusion matrix for {key} split...")
-        confusion_path = os.path.join(results_dir, f"{args.model}_{args.task_name}_{key}_confusion.png")
-        trainer.plot_confusion_matrix(data_loader=loader, mode=key)
+        try:
+            trainer.plot_confusion_matrix(data_loader=loader, mode=key)
+        except Exception as _e:
+            print(f"  [warn] plot_confusion_matrix failed on {key}: {_e}")
     print(f"***********************FEW_SHOT{args.enable_few_shot}")
     # Apply few-shot learning if enabled
     if args.enable_few_shot:
@@ -593,10 +628,13 @@ def main(args=None):
     # Create a summary table with all test results
     summary_table = []
     for split_name, metrics in all_results.items():
+        # ``metrics`` may carry None values for empty splits.
+        acc = metrics.get('accuracy')
+        f1 = metrics.get('f1_score')
         row = {
             'Split': split_name,
-            'Accuracy': f"{metrics['accuracy']:.4f}",
-            'F1-Score': f"{metrics['f1_score']:.4f}"
+            'Accuracy': f"{acc:.4f}" if isinstance(acc, (int, float)) else 'N/A',
+            'F1-Score': f"{f1:.4f}" if isinstance(f1, (int, float)) else 'N/A',
         }
         summary_table.append(row)
     

@@ -45,12 +45,14 @@ class BenchmarkCSIDataset(Dataset):
             self.task_dir = task_dir
             print(f"Using provided task directory: {self.task_dir}")
         else:
-            # Build paths
+            # Build paths.  The new ``CSI-Bench/`` layout does not use a
+            # ``tasks/`` prefix and groups multitask tasks under ``Multitask/``.
             possible_paths = [
-                os.path.join(dataset_root, "tasks", task_name),              # dataset_root/tasks/task_name
-                os.path.join(dataset_root, task_name),                        # dataset_root/task_name
+                os.path.join(dataset_root, task_name),                        # dataset_root/task_name (new layout)
+                os.path.join(dataset_root, "Multitask", task_name),           # dataset_root/Multitask/task_name (new layout)
+                os.path.join(dataset_root, "tasks", task_name),              # dataset_root/tasks/task_name (legacy)
                 os.path.join(dataset_root, task_name.lower()),                # dataset_root/task_name_lowercase
-                os.path.join(dataset_root, "tasks", task_name.lower())        # dataset_root/tasks/task_name_lowercase
+                os.path.join(dataset_root, "tasks", task_name.lower()),       # dataset_root/tasks/task_name_lowercase
             ]
             
             task_dir_found = None
@@ -149,7 +151,16 @@ class BenchmarkCSIDataset(Dataset):
         
         # Load metadata
         self.metadata = pd.read_csv(metadata_path)
-        
+
+        # Normalize a few task-inconsistent column names.  Some tasks (e.g.
+        # FallDetection) ship a capitalized ``Difficulty`` column while others
+        # use ``difficulty``; downstream code expects the lowercase form.
+        rename_map = {}
+        if "Difficulty" in self.metadata.columns and "difficulty" not in self.metadata.columns:
+            rename_map["Difficulty"] = "difficulty"
+        if rename_map:
+            self.metadata = self.metadata.rename(columns=rename_map)
+
         # Filter metadata for this split
         id_column = 'id' if 'id' in self.metadata.columns else 'sample_id'
         self.split_metadata = self.metadata[self.metadata[id_column].isin(self.split_ids)].reset_index(drop=True)
@@ -201,7 +212,25 @@ class BenchmarkCSIDataset(Dataset):
             
             # Check if task_dir is the same as dataset_root (use_root_as_task_dir=True case)
             using_root_as_task_dir = os.path.normpath(self.task_dir) == os.path.normpath(self.dataset_root)
-            
+
+            # The new ``CSI-Bench`` Multitask metadata files store paths like
+            # ``../../sub_Human_h5/...`` that are *relative to the metadata
+            # directory itself*.  Try that first before any of the legacy
+            # resolution branches.
+            if not os.path.isabs(original_filepath) and not os.path.exists(filepath):
+                candidate_md = os.path.normpath(
+                    os.path.join(self.task_dir, "metadata", original_filepath)
+                )
+                if os.path.exists(candidate_md):
+                    filepath = candidate_md
+                else:
+                    # Same but anchored at the task directory directly
+                    candidate_td = os.path.normpath(
+                        os.path.join(self.task_dir, original_filepath)
+                    )
+                    if os.path.exists(candidate_td):
+                        filepath = candidate_td
+
             # Handle the paths from the metadata file
             if os.path.exists(original_filepath):
                 # If the original path exists as-is, use it directly

@@ -1,0 +1,43 @@
+{
+  "pipeline": "multitask",
+  "training_dir": "~/Data/CSI-Bench/",
+  "output_dir": "./results/csi_bench_multitask",
+  "model": "transformer",
+  "tasks": [
+    "HumanActivityRecognition",
+    "HumanIdentification",
+    "ProximityRecognition"
+  ],
+  "feature_size": 232,
+  "win_len": 500,
+  "seed": 42,
+  "seeds": [42],
+  "batch_size": 128,
+  "epochs": 100,
+  "emb_dim": 128,
+  "dropout": 0.1,
+  "test_splits": "test_id,test_cross_device,test_cross_env,test_cross_user",
+  "learning_rate": 5e-4,
+  "weight_decay": 1e-5,
+  "patience": 15,
+  "warmup_epochs": 5,
+  "lora_r": 8,
+  "lora_alpha": 32,
+  "lora_dropout": 0.05,
+  "available_models": [
+    "mlp",
+    "lstm",
+    "resnet18",
+    "transformer",
+    "vit",
+    "patchtst",
+    "timesformer1d"
+  ],
+  "available_pipelines": ["supervised", "multitask"],
+  "evaluate_fewshot": false,
+  "integrated_loader": true,
+  "freeze_backbone": false,
+  "num_workers": 4,
+  "file_format": "h5",
+  "data_key": "CSI_amps"
+}

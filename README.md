@@ -43,31 +43,27 @@ This repository provides a unified framework for training and evaluating deep le
 
 3. Data Download:
 
-   Please find the [CSI-Bench dataset](https://www.kaggle.com/datasets/guozhenjennzhu/csi-bench) hosted on Kaggle. We have recently updated the dataset. It is now organized as:
-    
+   Please find the [CSI-Bench dataset](https://www.kaggle.com/datasets/guozhenjennzhu/csi-bench) hosted on Kaggle, or pull it directly from our S3 bucket:
+
+   ```bash
+   # Recommended: mirror the whole dataset to ~/Data/CSI-Bench/ on your g5.12xlarge
+   aws s3 sync s3://rnd-sagemaker/Data/fm_downstream/CSI-Bench/ ~/Data/CSI-Bench/
+   ```
+
+   The updated CSI-Bench layout no longer uses the legacy `tasks/` prefix.  Single-task datasets live directly under the root and the three multi-task sub-tasks share a `Multitask/` parent directory (so each per-task metadata can reference `../../sub_Human_h5/...`):
+
   ```
   CSI-Bench/
-  ├── Multitask/
-  ├── FallDetection/
-  ├── BreathingDetection/
-  ├── Localization/
-  ├── MotionSourceRecognition/
-  └── RawContinuousRecording/
-  ```
-
-  The updated Multitask subset is organized by benchmark task, metadata/split files, and file format:
-
-  ```
-  Multitask/
-  ├── HumanActivityRecognition/
-  │   ├── splits/
-  │   └── metadata/
-  ├── ProximityRecognition/
-  │   ├── splits/
-  │   └── metadata/
-  ├── ...
-  ├── sub_Human_h5/
-  └── sub_Human_mat/
+  ├── FallDetection/             # metadata/, splits/, sub_Human/
+  ├── BreathingDetection/        # metadata/, splits/, sub_Human/
+  ├── Localization/              # metadata/, splits/, sub_Human/
+  ├── MotionSourceRecognition/   # metadata/, splits/, sub_{Human,Pet,IRobot,Fan}/
+  └── Multitask/
+      ├── HumanActivityRecognition/  # metadata/, splits/
+      ├── HumanIdentification/       # metadata/, splits/
+      ├── ProximityRecognition/      # metadata/, splits/
+      ├── sub_Human_h5/              # shared H5 referenced via ../../ from metadata
+      └── sub_Human_mat/
   ```
 
   Each task directory follows a consistent structure:
@@ -88,52 +84,70 @@ This repository provides a unified framework for training and evaluating deep le
       ├── train_id.json             # Training set IDs
       ├── val_id.json               # Validation set IDs
       ├── test_id.json              # Test set IDs
-      ├── test_easy.json            # Easy difficulty test set
-      ├── test_medium.json          # Medium difficulty test set
-      └── test_hard.json            # Hard difficulty test set
+      ├── test_easy[_id].json       # Easy difficulty test set
+      ├── test_medium[_id].json     # Medium difficulty test set
+      ├── test_hard[_id].json       # Hard difficulty test set
+      ├── test_cross_device.json    # Out-of-distribution test (multitask only)
+      ├── test_cross_env.json
+      └── test_cross_user.json
   ```
+
+  > Split files whose name contains `_p<digit>` (e.g. `train_id_p5.json`, `p5_info.json`) belong to a separate few-shot subset experiment and are automatically ignored by the loader / runner — you can keep them in place.
 
 
 ## Local Execution (supervised learning)
 
-The main entry point for local execution is `scripts/local_runner.py`. This script handles configuration loading, model training, and result storage.
+The main entry point for local execution is `scripts/local_runner.py`. This script handles configuration loading, model training, and result storage. For paper reproduction we ship `configs/csi_bench_local_config.json` which is preconfigured for the new dataset layout and a `g5.12xlarge` host.
 
 ### Configuration
 
-Edit the local configuration file at `configs/local_default_config.json` to set your data path and other parameters:
+Edit the local configuration file at `configs/csi_bench_local_config.json` to set your data path and other parameters:
 
 ```json
 {
   "pipeline": "supervised",
-  "training_dir": "/path/to/your/data/",
-  "output_dir": "./results", 
+  "training_dir": "~/Data/CSI-Bench/",
+  "output_dir": "./results/csi_bench",
+  "task": "FallDetection",
+  "available_tasks": ["FallDetection", "BreathingDetection", "Localization", "MotionSourceRecognition"],
   "available_models": ["mlp", "lstm", "resnet18", "transformer", "vit", "patchtst", "timesformer1d"],
-  "task": "YourTask",
   "win_len": 500,
   "feature_size": 232,
-  "batch_size": 32,
+  "seed": 42,
+  "seeds": [42],
+  "batch_size": 128,
   "epochs": 100,
+  "learning_rate": 1e-3,
+  "weight_decay": 1e-5,
+  "warmup_epochs": 5,
+  "patience": 15,
   "test_splits": "all"
 }
 ```
 
 Key parameters:
-- `pipeline`: Training pipeline type 
-- `training_dir`: Path to your data directory. The scripts will look for data at `training_dir/tasks/CURRENT_TASK/...`. Make sure that the data directory is the root directory where you downloaded the dataset. It should contain a "tasks" folder with multiple subfolders for different tasks. Examples:
-  ```
-  "C:\\Users\\weiha\\Desktop\\CSI-Bench"
-  "/Users/leo/Desktop/CSI-Bench"
-  ```
-- `output_dir`: Directory to save results (default: `./results`)
-- `available_models`: Model types to train, default list is all models in this project
-- `task`: Task name (see Available Tasks)
-- `batch_size`, `epochs`: Training parameters
+- `pipeline`: Training pipeline type
+- `training_dir`: Root directory of your CSI-Bench dataset (e.g. `~/Data/CSI-Bench/`). The new layout no longer uses a `tasks/` prefix; the loader searches `<training_dir>/<task>/` and `<training_dir>/Multitask/<task>/` automatically.
+- `output_dir`: Directory to save results (default: `./results/csi_bench`)
+- `available_models`: Model types to train, default list is all 7 models in this project
+- `available_tasks`: When set, the runner sweeps over each task in turn (otherwise it falls back to the single `task` field)
+- `seed` / `seeds`: Pass a single seed (default 42 for the Phase E single-seed sweep) or a list (e.g. `[42, 43, 44]` for the Phase F mean ± std re-run)
+- `batch_size`, `epochs`, `learning_rate`, `weight_decay`, `warmup_epochs`, `patience`: Training hyper-parameters (defaults match the paper appendix B.3)
 
 ### Running Models
 
-Basic usage:
+Basic usage (single task, single seed):
 ```bash
-python scripts/local_runner.py
+python scripts/local_runner.py --config configs/csi_bench_local_config.json
+```
+
+Full paper-style sweep (all 4 single-tasks × 7 models × N seeds):
+```bash
+# Phase E -- single-seed sweep (seed=42).  Default deliverable.
+python scripts/run_seed_sweep.py --config configs/csi_bench_local_config.json
+
+# Phase F (opt-in) -- mean ± std with three seeds
+python scripts/run_seed_sweep.py --config configs/csi_bench_local_config.json --seeds 42,43,44
 ```
 
 ### Available Models
@@ -189,22 +203,24 @@ The multi-task learning pipeline uses the same entry point as supervised learnin
 
 ### Configuration
 
-Modify configuration file for multi-task learning `configs/multitask_config.json`:
+The repo ships `configs/csi_bench_multitask_config.json` preconfigured for the paper's multi-task Transformer experiment (Tab. 4 / Tab. 12-14):
 
 ```json
 {
   "pipeline": "multitask",
-  "training_dir": "/path/to/your/data/",
-  "output_dir": "./results",
+  "training_dir": "~/Data/CSI-Bench/",
+  "output_dir": "./results/csi_bench_multitask",
   "model": "transformer",
-  "tasks": ["TaskA", "TaskB"],
+  "tasks": ["HumanActivityRecognition", "HumanIdentification", "ProximityRecognition"],
   "feature_size": 232,
   "win_len": 500,
-  "batch_size": 32,
-  "epochs": 30,
+  "seed": 42,
+  "seeds": [42],
+  "batch_size": 128,
+  "epochs": 100,
   "emb_dim": 128,
   "dropout": 0.1,
-  "test_splits": "all",
+  "test_splits": "test_id,test_cross_device,test_cross_env,test_cross_user",
   "learning_rate": 5e-4,
   "weight_decay": 1e-5,
   "patience": 15,
@@ -217,15 +233,12 @@ Modify configuration file for multi-task learning `configs/multitask_config.json
 
 Key parameters:
 - `pipeline`: Set to `"multitask"` for the multi-task learning pipeline
-- `training_dir`: Path to your data directory. The scripts will look for data at `training_dir/tasks/CURRENT_TASK/...`. Make sure that the data directory is the root directory where you downloaded the dataset. It should contain a "tasks" folder with multiple subfolders for different tasks. Examples:
-  ```
-  "C:\\Users\\weiha\\Desktop\\CSI-Bench"
-  "/Users/leo/Desktop/CSI-Bench"
-  ```
-- `output_dir`: Directory to save results (default: `./results`)
+- `training_dir`: Root of your CSI-Bench dataset.  The loader automatically searches `<training_dir>/Multitask/<task>/` for each multi-task sub-task.
+- `output_dir`: Directory to save results (default: `./results/csi_bench_multitask`)
 - `model`: Model type, currently multi-task learning supports `transformer`, `patchtst`, and `timesformer1d`
 - `tasks`: List of tasks to train simultaneously
-- `lora_r`, `lora_alpha`, `lora_dropout`: Parameters for LoRA adapters
+- `seed` / `seeds`: Single seed (default 42) or list for multi-seed runs
+- `lora_r`, `lora_alpha`, `lora_dropout`: LoRA adapter parameters
 - `learning_rate`: Learning rate, default is 5e-4
 - `patience`: Early stopping patience value, default is 15
 
@@ -233,7 +246,13 @@ Key parameters:
 
 Basic usage:
 ```bash
-python scripts/local_runner.py --config_file configs/multitask_config.json
+python scripts/local_runner.py --config configs/csi_bench_multitask_config.json
+```
+
+…or via the seed sweep helper:
+
+```bash
+python scripts/run_seed_sweep.py --config configs/csi_bench_multitask_config.json
 ```
 
 ### Supported Models
@@ -265,57 +284,66 @@ Multi-task learning uses LoRA (Low-Rank Adaptation) technology to enable efficie
 
 
 
-## SageMaker Integration 
+## SageMaker Integration
 
-The repository provides robust support for scaling WiFi sensing model training on AWS SageMaker. This allows you to leverage cloud computing resources for larger experiments.
+The repository provides robust support for scaling CSI-Bench training on AWS SageMaker.  The default ready-made config (`configs/csi_bench_sagemaker_config.json`) targets `ml.g5.12xlarge` instances and the new S3 layout at `s3://rnd-sagemaker/Data/fm_downstream/CSI-Bench/` — no `tasks/` prefix.
 
 ### Configuration
 
-Edit the SageMaker configuration file at `configs/sagemaker_default_config.json` to set your S3 paths and training parameters:
+Edit `configs/csi_bench_sagemaker_config.json` to set your S3 paths and training parameters:
 
 ```json
 {
   "pipeline": "supervised",
-  "s3_data_base": "s3://your-bucket/path/to/data/",
-  "s3_output_base": "s3://your-bucket/path/to/output/",
+  "s3_data_base": "s3://rnd-sagemaker/Data/fm_downstream/CSI-Bench/",
+  "s3_output_base": "s3://rnd-sagemaker/CSI-Bench-Results/",
   "win_len": 500,
   "feature_size": 232,
   "batch_size": 128,
   "epochs": 100,
   "learning_rate": 1e-3,
   "weight_decay": 1e-5,
-  "instance_type": ["ml.g4dn.2xlarge"],
+  "instance_type": ["ml.g5.12xlarge"],
+  "framework_version": "2.0.0",
+  "py_version": "py310",
   "available_models": ["mlp", "lstm", "resnet18", "transformer", "vit", "patchtst", "timesformer1d"],
-  "available_tasks": ["YourTask1", "YourTask2"],
-  "test_splits": "all"
+  "available_tasks": ["FallDetection", "BreathingDetection", "Localization", "MotionSourceRecognition"],
+  "test_splits": "all",
+  "use_root_data_path": true
 }
 ```
 
 Key parameters:
-- `pipeline`: Training pipeline type (currently sagemaker runner only support `supervised` `)
-- `s3_data_base`: S3 path to your data directory (must follow the expected structure)
+- `pipeline`: Training pipeline type (`supervised` or `multitask`)
+- `s3_data_base`: S3 prefix that contains `FallDetection/`, `BreathingDetection/`, `Localization/`, `MotionSourceRecognition/`, and `Multitask/`.  The SageMaker runner mounts the right sub-prefix for each task automatically — single-tasks mount `<base>/<task>/`, multi-task sub-tasks mount `<base>/Multitask/` (so the shared `sub_Human_h5/` is available).
 - `s3_output_base`: S3 path for storing results
-- `instance_type`: AWS instance type to use (can be a list for different tasks)
+- `instance_type`: AWS instance type (default `ml.g5.12xlarge`, 4×A10G + 192 GiB RAM)
 - `available_models`: Model types to train
-- `available_tasks`: Tasks to run experiments on. It will submit 1 training job for one task (with all models in the list)
+- `available_tasks`: One SageMaker job is submitted per task; each job sweeps all models
 
-### Data Structure
+### Data Structure on S3
 
-You can store the benchmark dataset to S3
+The expected S3 layout matches the new CSI-Bench layout described in the [Data Download](#installation-and-setup) section above:
+
 ```
-s3://your-bucket/path/to/data/
-├── tasks/
-│   ├── TaskName1/
-│   │   ├── <standard task structure>
-│   ├── TaskName2/
-│   └── ...
+s3://your-bucket/path/CSI-Bench/
+├── FallDetection/
+├── BreathingDetection/
+├── Localization/
+├── MotionSourceRecognition/
+└── Multitask/
+    ├── HumanActivityRecognition/
+    ├── HumanIdentification/
+    ├── ProximityRecognition/
+    ├── sub_Human_h5/
+    └── sub_Human_mat/
 ```
 
 ### Running Models
 
 Basic usage:
 ```bash
-python scripts/sagemaker_runner.py
+python scripts/sagemaker_runner.py --config configs/csi_bench_sagemaker_config.json
 ```
 
 
@@ -339,6 +367,77 @@ Results and model artifacts will be stored in the S3 output location you specifi
 2. **Parallelization**: Run multiple experiments simultaneously
 3. **Cost Efficiency**: Only pay for the compute time you use
 4. **Reproducibility**: Consistent environment for all experiments
+
+
+
+
+## Reproducing the CSI-Bench paper
+
+The repo ships three preconfigured configs and a sweep helper that reproduce every table in the NeurIPS 2025 paper (Tab. 3, 4, 8-14) on a `ml.g5.12xlarge` instance against the updated dataset at `s3://rnd-sagemaker/Data/fm_downstream/CSI-Bench/` (or its local mirror `~/Data/CSI-Bench/`).
+
+### One-time setup
+
+```bash
+# 1) Mirror the dataset locally on the g5.12xlarge (~78 GiB)
+aws s3 sync s3://rnd-sagemaker/Data/fm_downstream/CSI-Bench/ ~/Data/CSI-Bench/
+
+# 2) Install dependencies and (only for multi-task LoRA) install peft
+pip install -r requirements.txt
+pip install peft
+
+# 3) (one-time) regenerate the 4-class MotionSourceRecognition mapping if needed
+python util/build_msr_label_mapping.py --verify
+```
+
+### Phase E — single-seed sweep (default deliverable)
+
+```bash
+# Supervised single-task (Tab. 3 + difficulty tables Tab. 8/9/10/11):
+python scripts/run_seed_sweep.py --config configs/csi_bench_local_config.json
+
+# Multi-task adapter (Tab. 4 multi-task vs single-task) and OOD tables (Tab. 12/13/14):
+python scripts/run_seed_sweep.py --config configs/csi_bench_multitask_config.json
+```
+
+### Phase F — three-seed sweep (optional, opt-in)
+
+```bash
+python scripts/run_seed_sweep.py --config configs/csi_bench_local_config.json     --seeds 42,43,44
+python scripts/run_seed_sweep.py --config configs/csi_bench_multitask_config.json --seeds 42,43,44
+```
+
+### Aggregating results into paper tables
+
+`result_analysis/all_result_summary.py` walks the results directory and emits the paper-style CSV tables.  Pass `--seeds 42` (default) for single-seed reporting or `--seeds 42,43,44` for the mean ± std format used in the paper.
+
+```bash
+# Single-seed (Phase E)
+python result_analysis/all_result_summary.py \
+  --results-dir ./results/csi_bench \
+  --multitask-results-dir ./results/csi_bench_multitask \
+  --output-dir result_analysis/csi_bench_new
+
+# Three seeds (Phase F)
+python result_analysis/all_result_summary.py \
+  --results-dir ./results/csi_bench \
+  --multitask-results-dir ./results/csi_bench_multitask \
+  --output-dir result_analysis/csi_bench_new_3seeds \
+  --seeds 42,43,44
+```
+
+Output CSVs (one per paper table):
+
+| File | Paper reference |
+|---|---|
+| `tab3_supervised.csv` | Tab. 3 — single-task supervised accuracy / F1 on `test_id` |
+| `tab4_multitask_vs_singletask.csv` | Tab. 4 — multitask Transformer vs single-task Transformer |
+| `tab8_fall_difficulty.csv` | Tab. 8 — FallDetection easy / medium / hard |
+| `tab9_breath_difficulty.csv` | Tab. 9 — BreathingDetection easy / medium / hard |
+| `tab10_loc_difficulty.csv` | Tab. 10 — Localization easy / medium / hard |
+| `tab11_msr_difficulty.csv` | Tab. 11 — MotionSourceRecognition easy / medium / hard (4-class) |
+| `tab12_har_ood.csv` | Tab. 12 — HumanActivityRecognition cross-device / env / user |
+| `tab13_uid_ood.csv` | Tab. 13 — HumanIdentification cross-device / env / user |
+| `tab14_prox_ood.csv` | Tab. 14 — ProximityRecognition cross-device / env / user |
 
 
 

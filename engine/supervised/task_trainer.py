@@ -308,10 +308,16 @@ class TaskTrainer(BaseTrainer):
                 
             epoch_accuracy += correct
         
-        # Calculate averages
-        epoch_loss /= total_samples
-        epoch_accuracy /= total_samples
-        time_per_sample = total_time / total_samples
+        # Calculate averages.  Guard against empty loaders.
+        if total_samples == 0:
+            print("[train_epoch] No samples in train loader; skipping averaging.")
+            epoch_loss = 0.0
+            epoch_accuracy = 0.0
+            time_per_sample = 0.0
+        else:
+            epoch_loss /= total_samples
+            epoch_accuracy /= total_samples
+            time_per_sample = total_time / total_samples
         
         # Synchronize metrics across processes in distributed training
         if self.distributed and torch.distributed.is_initialized():
@@ -404,9 +410,15 @@ class TaskTrainer(BaseTrainer):
                     
                 total_correct += correct
         
-        # Calculate averages
-        avg_loss = total_loss / total_samples
-        accuracy = total_correct / total_samples
+        # Calculate averages.  Guard against empty loaders (e.g. a difficulty
+        # tier with zero samples) so we surface a 0/0 result instead of crashing.
+        if total_samples == 0:
+            print("[evaluate] No samples in this loader; returning zeros.")
+            avg_loss = 0.0
+            accuracy = 0.0
+        else:
+            avg_loss = total_loss / total_samples
+            accuracy = total_correct / total_samples
         
         # Synchronize metrics across processes in distributed training
         if self.distributed and torch.distributed.is_initialized():

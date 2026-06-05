@@ -162,18 +162,29 @@ class SageMakerRunner:
                 for obj in response['CommonPrefixes']:
                     folder = obj['Prefix'].split('/')[-2]
                     print(f"  - {folder}/")
-                    
-                # Check if tasks directory exists
-                tasks_prefix = prefix + 'tasks/'
-                tasks_resp = s3_client.list_objects_v2(Bucket=bucket, Prefix=tasks_prefix, Delimiter='/')
-                
-                if 'CommonPrefixes' in tasks_resp:
-                    print(f"Available tasks in {self.s3_data_base}tasks/:")
-                    for obj in tasks_resp['CommonPrefixes']:
-                        task_name = obj['Prefix'].split('/')[-2]
-                        print(f"  - {task_name}/")
-                else:
-                    print(f"Warning: No tasks found in {self.s3_data_base}tasks/")
+
+                # New ``CSI-Bench`` layout puts tasks directly under the data
+                # base; the legacy layout used a ``tasks/`` subdir.  Try the
+                # new layout first, then fall back to the legacy one.
+                tried_legacy = False
+                for sub_prefix in ('', 'tasks/', 'Multitask/'):
+                    full_prefix = prefix + sub_prefix
+                    subresp = s3_client.list_objects_v2(
+                        Bucket=bucket, Prefix=full_prefix, Delimiter='/'
+                    )
+                    if 'CommonPrefixes' in subresp:
+                        label = full_prefix
+                        print(f"Available tasks in s3://{bucket}/{label}:")
+                        for obj in subresp['CommonPrefixes']:
+                            task_name = obj['Prefix'].split('/')[-2]
+                            print(f"  - {task_name}/")
+                    elif sub_prefix == 'tasks/':
+                        tried_legacy = True
+                if tried_legacy:
+                    print(
+                        f"(No legacy 'tasks/' subdir under {self.s3_data_base}; "
+                        f"that's fine for the new CSI-Bench layout.)"
+                    )
             else:
                 print(f"Warning: S3 path {self.s3_data_base} appears to be empty")
         except Exception as e:
@@ -448,37 +459,47 @@ class SageMakerRunner:
         
         return estimator
     
-    def _prepare_inputs(self, config):
-        """
-        Prepare training data input channels
-        Use only specific task data paths
+    # Multi-task subtasks live under ``CSI-Bench/Multitask/<task>/`` in the new
+    # S3 layout.  Single-task datasets live directly under ``CSI-Bench/<task>/``.
+    _MULTITASK_TASKS = {
+        "HumanActivityRecognition",
+        "HumanIdentification",
+        "ProximityRecognition",
+    }
 
-        Note: The expected S3 data structure is:
-        s3://bucket/path/tasks/TaskName/
-        
-        When downloaded to the SageMaker instance, the data will be at:
-        /opt/ml/input/data/training/
-        
-        The code expects to find the task data at:
-        /opt/ml/input/data/training/tasks/TaskName/
-        or directly at:
-        /opt/ml/input/data/training/TaskName/
-        
-        Ensure your S3 data is structured accordingly.
+    def _task_s3_path(self, task: str) -> str:
+        """Return the S3 prefix that contains the given task's data.
+
+        Supports both the new layout (``s3_data_base/<task>/`` or
+        ``s3_data_base/Multitask/<task>/``) and the legacy layout
+        (``s3_data_base/tasks/<task>/``).  The new layout is preferred.
         """
-        task = config.get('task', config.get('task_name'))
-        
-        # Ensure path ends with a slash
         s3_data_base = self.s3_data_base
         if not s3_data_base.endswith('/'):
             s3_data_base += '/'
-        
-        # Use task-specific path instead of the entire root directory
-        task_data_path = f"{s3_data_base}tasks/{task}/"
+        if task in self._MULTITASK_TASKS:
+            return f"{s3_data_base}Multitask/{task}/"
+        return f"{s3_data_base}{task}/"
+
+    def _prepare_inputs(self, config):
+        """Prepare training data input channels for a single task.
+
+        Expected S3 data structure (new ``CSI-Bench`` layout)::
+
+            s3://bucket/path/CSI-Bench/<task>/                  # single-task
+            s3://bucket/path/CSI-Bench/Multitask/<task>/        # co-labeled
+            s3://bucket/path/CSI-Bench/Multitask/sub_Human_h5/  # shared H5
+
+        When downloaded to a SageMaker instance the data shows up at
+        ``/opt/ml/input/data/training/`` and the loader treats that directory
+        as ``task_dir`` (via ``--use_root_data_path``).  No ``tasks/`` prefix is
+        injected.
+        """
+        task = config.get('task', config.get('task_name'))
+        task_data_path = self._task_s3_path(task)
         print(f"Using task-specific data path: {task_data_path}")
         print(f"Task name: {task} - Data will be downloaded to /opt/ml/input/data/training/")
-        
-        # Define input channels
+
         input_data = {
             'training': TrainingInput(
                 s3_data=task_data_path,
@@ -486,7 +507,20 @@ class SageMakerRunner:
                 s3_data_type='S3Prefix'
             )
         }
-        
+
+        # For multitask single-task training (e.g. Transformer-only Tab. 4
+        # baseline) we also need the shared ``sub_Human_h5/`` data, which lives
+        # one level above the per-task metadata.  Mount the whole Multitask/
+        # parent so the ``../../sub_Human_h5/...`` paths in the metadata
+        # resolve correctly.
+        if task in self._MULTITASK_TASKS:
+            s3_data_base = self.s3_data_base.rstrip('/') + '/'
+            input_data['training'] = TrainingInput(
+                s3_data=f"{s3_data_base}Multitask/",
+                content_type='application/x-recordio',
+                s3_data_type='S3Prefix',
+            )
+
         return input_data
     
     def run_multitask(self, tasks=None, model_type="transformer", override_config=None):
@@ -572,17 +606,26 @@ class SageMakerRunner:
             instance_type = instance_type[0]
             print(f"For multitask learning, using the first instance type from list: {instance_type}")
         
-        # Prepare hyperparameters - Use dashes instead of underscores for parameter names
+        # Prepare hyperparameters - Use dashes instead of underscores for parameter names.
+        # ``pipeline`` is intentionally NOT a hyperparameter: SageMaker would
+        # try to pass ``--pipeline multitask`` to ``train_multitask_adapter.py``
+        # which uses ``parse_args()`` (strict) and would reject it.  Dispatch
+        # to the multitask script via ``SAGEMAKER_PROGRAM`` instead.
         hyperparameters = {
-            'pipeline': 'multitask',
             'tasks': config.get('tasks'),
             'model': config.get('model', 'transformer'),
+            # SageMaker mounts the training channel at /opt/ml/input/data/training,
+            # which (per ``_prepare_multitask_inputs``) is the contents of
+            # ``s3_data_base/Multitask/``.  The multitask script's default
+            # ``wifi_benchmark_dataset`` is meaningless inside the container.
+            'data-dir': '/opt/ml/input/data/training',
+            'save-dir': '/opt/ml/model',
             'win-len': config.get('win_len', 500),
             'feature-size': config.get('feature_size', 232),
             'batch-size': config.get('batch_size', 16),
             'epochs': config.get('epochs', 100),
             'test-splits': config.get('test_splits', 'all'),
-            'seed': config.get('seed', 42)
+            'seed': config.get('seed', 42),
         }
         
         # Add few-shot parameters (if enabled)
@@ -647,57 +690,48 @@ class SageMakerRunner:
                 'SAGEMAKER_TRAINING_JOB_END_DISABLE': 'true',
                 'SAGEMAKER_DEBUG_OUTPUT_DISABLED': 'true',
                 'SAGEMAKER_OUTPUT_STRUCTURE_CLEAN': 'true',  # Custom flag for our code
-                'SAGEMAKER_PROGRAM': 'scripts/train_multi_model.py'  # Explicitly set the script to run
+                'SAGEMAKER_PROGRAM': 'scripts/train_multitask_adapter.py'  # Multi-task LoRA-adapter training entry
             }
         )
         
         return estimator
     
     def _prepare_multitask_inputs(self, config):
+        """Prepare input data channels for multi-task training.
+
+        New ``CSI-Bench`` layout: the three multi-task sub-tasks
+        (``HumanActivityRecognition``, ``HumanIdentification``,
+        ``ProximityRecognition``) plus the shared ``sub_Human_h5/`` and
+        ``sub_Human_mat/`` directories all live under
+        ``CSI-Bench/Multitask/``.  Mount that parent directory so each
+        per-task metadata's ``../../sub_Human_h5/...`` references resolve.
         """
-        Prepare input data channels for multi-task training
-        Ensure only download data required for tasks
-        """
-        # Ensure path ends with a slash
         s3_data_base = self.s3_data_base
         if not s3_data_base.endswith('/'):
             s3_data_base += '/'
-        
-        # Get task list
+
         tasks_str = config.get('tasks', '')
-        tasks_list = [t.strip() for t in tasks_str.split(',') if t.strip()]
-        
-        if not tasks_list:
-            print("Warning: No tasks specified, using entire data directory")
-            data_path = s3_data_base
+        if isinstance(tasks_str, list):
+            tasks_list = [t.strip() for t in tasks_str if t and str(t).strip()]
         else:
-            # Prepare input data for multi-task learning
-            # Use only specific task data paths
-            data_paths = []
-            for task in tasks_list:
-                task_path = f"{s3_data_base}tasks/{task}/"
-                data_paths.append(task_path)
-            
-            # If only one task, use its path directly
-            if len(data_paths) == 1:
-                data_path = data_paths[0]
-                print(f"Multi-task learning using single task data path: {data_path}")
-            else:
-                # If multiple tasks, we need to combine them through a manifest file or other means
-                # But in current SageMaker implementation, we can only specify one path, so use parent directory
-                data_path = f"{s3_data_base}tasks/"
-                print(f"Multi-task learning using multiple tasks ({len(tasks_list)} tasks), data path: {data_path}")
-                print(f"Task list: {', '.join(tasks_list)}")
-        
-        # Define input channels
+            tasks_list = [t.strip() for t in tasks_str.split(',') if t.strip()]
+
+        data_path = f"{s3_data_base}Multitask/"
+        if tasks_list:
+            print(
+                f"Multi-task learning using {len(tasks_list)} tasks "
+                f"({', '.join(tasks_list)}); data path: {data_path}"
+            )
+        else:
+            print(f"Warning: No tasks specified; defaulting to data path {data_path}")
+
         input_data = {
             'training': TrainingInput(
                 s3_data=data_path,
                 content_type='application/x-recordio',
-                s3_data_type='S3Prefix'
+                s3_data_type='S3Prefix',
             )
         }
-        
         return input_data
 
 def run_from_config(config_path=None):
