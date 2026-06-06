@@ -25,11 +25,7 @@
   "lora_alpha": 32,
   "lora_dropout": 0.05,
   "available_models": [
-    "mlp",
-    "lstm",
-    "resnet18",
     "transformer",
-    "vit",
     "patchtst",
     "timesformer1d"
   ],

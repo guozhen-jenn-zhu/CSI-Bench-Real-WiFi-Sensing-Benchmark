@@ -530,7 +530,14 @@ def run_multitask_direct(config):
     cmd += f" --batch_size={config.get('batch_size')}"
     cmd += f" --win_len={config.get('win_len')}"
     cmd += f" --feature_size={config.get('feature_size')}"
-    
+
+    # Multi-task script writes ``<save_dir>/<task>/<model>/<exp_id>/`` per task,
+    # which is exactly the layout the aggregator expects.  Without this the
+    # script falls back to ``PROJECT_ROOT/results/multitask`` and the per-task
+    # results never land under the user's ``output_dir``.
+    quoted_output_dir = f'"{base_output_dir}"'
+    cmd += f" --save_dir={quoted_output_dir}"
+
     # Disable distributed training and CPU optimization
     cmd += " --num_workers=0"
     cmd += " --use_root_data_path"  # Flag parameter without value

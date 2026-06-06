@@ -112,9 +112,22 @@ def parse_args():
     return args
 
 
+_SUPPORTED_MULTITASK_MODELS = {"transformer", "patchtst", "timesformer1d"}
+
+
 def main():
     args = parse_args()
-    
+
+    # Fail fast for unsupported backbones; only transformer/PatchTST/TimesFormer-1D
+    # have LoRA-adapter wrappers implemented.
+    if args.model not in _SUPPORTED_MULTITASK_MODELS:
+        raise SystemExit(
+            f"Multi-task adapter does not support backbone '{args.model}'. "
+            f"Supported backbones: {sorted(_SUPPORTED_MULTITASK_MODELS)}. "
+            f"For other models, run them through ``scripts/train_supervised.py`` "
+            f"as single-task baselines instead."
+        )
+
     # Convert save_dir to absolute path if it's relative
     if not os.path.isabs(args.save_dir):
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
