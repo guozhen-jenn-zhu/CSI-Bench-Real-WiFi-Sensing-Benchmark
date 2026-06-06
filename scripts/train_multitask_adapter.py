@@ -449,6 +449,8 @@ def main():
                 self.blocks = cls_model.blocks
                 self.norm = cls_model.norm
                 self.emb_dim = cls_model.emb_dim
+                self.feature_size = cls_model.feature_size
+                self.win_len = cls_model.win_len
 
             def forward(self, x):
                 # Handle input dimensions
@@ -456,7 +458,7 @@ def main():
                     x = x.squeeze(1)  # Remove channel dimension
                 
                 # Ensure shape is [batch, feature_size, win_len]
-                if x.shape[1] != x.shape[2] and x.shape[2] == self.feature_size:
+                if x.shape[1] == self.win_len and x.shape[2] == self.feature_size:
                     x = x.transpose(1, 2)
                     
                 # Patch embedding: [batch, feature_size, win_len] -> [batch, num_patches, emb_dim]
