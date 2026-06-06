@@ -5,7 +5,6 @@
   "task": "FallDetection",
   "available_tasks": [
     "FallDetection",
-    "BreathingDetection",
     "Localization",
     "MotionSourceRecognition",
     "HumanActivityRecognition",
