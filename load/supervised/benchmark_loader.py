@@ -87,6 +87,20 @@ def load_benchmark_supervised(
             test_splits = "all"
         else:
             test_splits = [test_splits]
+
+    # ``BenchmarkCSIDataset.__getitem__`` returns ``None`` for samples whose
+    # underlying H5 is missing on disk; without a Nones-filtering collate the
+    # default one would crash with a ``TypeError``.  Provide a safe default
+    # whenever the caller didn't pass one explicitly.
+    if collate_fn is None:
+        def _filter_none_collate(batch):
+            batch = [item for item in batch if item is not None]
+            if len(batch) == 0:
+                # Returning empty tensors lets training loops detect & skip
+                # empty batches without crashing.
+                return torch.zeros(0), torch.zeros(0, dtype=torch.long)
+            return torch.utils.data.dataloader.default_collate(batch)
+        collate_fn = _filter_none_collate
     
     # Debug output
     data_dir_debug = os.path.join(dataset_root, "tasks", task_name)

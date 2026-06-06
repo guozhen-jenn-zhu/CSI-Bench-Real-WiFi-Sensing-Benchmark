@@ -172,7 +172,13 @@ class BenchmarkCSIDataset(Dataset):
             raise ValueError(f"Label column '{label_column}' not found in metadata")
             
         print(f"Loaded {len(self.split_metadata)} samples for {task_name} - {split_name}")
-        
+
+        # Pre-flight: scan every file_path referenced by this split to surface
+        # missing-on-disk files as ONE loud warning *before* training starts,
+        # rather than a trickle of per-getitem messages.  Skipped automatically
+        # when ``debug=True`` is off and the split is empty.
+        self._preflight_missing_files()
+
         # Initialize label mapper if not provided
         if label_mapper is None:
             # Use the task_dir
@@ -200,199 +206,121 @@ class BenchmarkCSIDataset(Dataset):
     
     def __len__(self):
         return len(self.split_metadata)
-    
+
+    # Per-Dataset (per-worker) cap on missing-file warnings so the log stays
+    # readable when a split references many files that aren't on disk.
+    _MISSING_LOG_CAP = 5
+    # How many example missing paths to print in the loud preflight warning.
+    _PREFLIGHT_EXAMPLES = 5
+
+    def _preflight_missing_files(self):
+        """Scan every file referenced by this split and print a single loud
+        warning if any are missing on disk.  Stores the missing paths on
+        ``self.missing_file_paths`` for downstream tooling to consume.
+        """
+        self.missing_file_paths: list[str] = []
+        if len(self.split_metadata) == 0:
+            return
+
+        for fp in self.split_metadata[self.data_column].astype(str):
+            resolved, _ = self._resolve_filepath(fp)
+            if resolved is None:
+                self.missing_file_paths.append(fp)
+
+        n_missing = len(self.missing_file_paths)
+        n_total = len(self.split_metadata)
+        if n_missing == 0:
+            return
+
+        pct = 100.0 * n_missing / n_total if n_total else 0.0
+        bar = "!" * 78
+        print(bar)
+        print(
+            f"!! WARNING: {n_missing}/{n_total} ({pct:.1f}%) referenced files are "
+            f"MISSING ON DISK"
+        )
+        print(f"!!   task        : {self.task_name}")
+        print(f"!!   split       : {self.split_name}")
+        print(f"!!   task_dir    : {self.task_dir}")
+        print(f"!!   dataset_root: {self.dataset_root}")
+        print(f"!! These samples will be silently skipped during training/eval.")
+        print(f"!! First {min(n_missing, self._PREFLIGHT_EXAMPLES)} missing paths:")
+        for p in self.missing_file_paths[: self._PREFLIGHT_EXAMPLES]:
+            print(f"!!   - {p}")
+        if n_missing > self._PREFLIGHT_EXAMPLES:
+            print(
+                f"!!   ... and {n_missing - self._PREFLIGHT_EXAMPLES} more "
+                f"(stored on dataset.missing_file_paths)"
+            )
+        print(bar)
+
+    def _resolve_filepath(self, original_filepath: str):
+        """Return the first existing on-disk path for ``original_filepath``.
+
+        Tries every known layout (new ``CSI-Bench`` flat layout, the
+        ``Multitask/<task>/`` layout where metadata stores paths like
+        ``../../sub_Human_h5/...``, and the legacy ``tasks/`` prefix layout)
+        and returns ``(resolved_path or None, candidates_tried)``.
+        """
+        # Already absolute & on disk -> use directly.
+        if os.path.isabs(original_filepath) and os.path.exists(original_filepath):
+            return original_filepath, [original_filepath]
+
+        candidates: list[str] = []
+
+        def _try(p: str) -> None:
+            if p and p not in candidates:
+                candidates.append(p)
+
+        # New layout: file_path is relative to either the task dir or the
+        # task's metadata dir (multi-task case).
+        _try(os.path.normpath(os.path.join(self.task_dir, original_filepath)))
+        _try(os.path.normpath(os.path.join(self.task_dir, "metadata",
+                                           original_filepath)))
+        # Falls back to dataset_root in case the user passed
+        # ``use_root_as_task_dir=True`` but file_path uses the bare task name.
+        _try(os.path.normpath(os.path.join(self.dataset_root, original_filepath)))
+        # Legacy ``tasks/`` prefix layouts.
+        _try(os.path.normpath(os.path.join(self.dataset_root, "tasks",
+                                           self.task_name, original_filepath)))
+        _try(os.path.normpath(os.path.join(self.dataset_root, "tasks",
+                                           original_filepath)))
+
+        for cand in candidates:
+            if os.path.exists(cand):
+                return cand, candidates
+        return None, candidates
+
     def __getitem__(self, idx):
         """Get sample by index"""
         try:
             row = self.split_metadata.iloc[idx]
-            
-            # Get file path (might be relative to dataset_root)
+
             original_filepath = row[self.data_column]
-            filepath = original_filepath
-            
-            # Check if task_dir is the same as dataset_root (use_root_as_task_dir=True case)
-            using_root_as_task_dir = os.path.normpath(self.task_dir) == os.path.normpath(self.dataset_root)
+            filepath, candidates = self._resolve_filepath(original_filepath)
 
-            # The new ``CSI-Bench`` Multitask metadata files store paths like
-            # ``../../sub_Human_h5/...`` that are *relative to the metadata
-            # directory itself*.  Try that first before any of the legacy
-            # resolution branches.
-            if not os.path.isabs(original_filepath) and not os.path.exists(filepath):
-                candidate_md = os.path.normpath(
-                    os.path.join(self.task_dir, "metadata", original_filepath)
-                )
-                if os.path.exists(candidate_md):
-                    filepath = candidate_md
-                else:
-                    # Same but anchored at the task directory directly
-                    candidate_td = os.path.normpath(
-                        os.path.join(self.task_dir, original_filepath)
+            # File not present on disk for this sample.  Don't raise -- the
+            # outer ``try/except`` would catch the FileNotFoundError and emit
+            # a multi-line ``Error processing sample`` message PER worker PER
+            # call which buries the rest of the log.  Instead, emit at most
+            # ``_MISSING_LOG_CAP`` concise warnings per dataset instance and
+            # silently return ``None`` (the custom collate fn drops Nones).
+            if filepath is None:
+                self._missing_seen = getattr(self, "_missing_seen", 0) + 1
+                if self._missing_seen <= self._MISSING_LOG_CAP:
+                    print(
+                        f"[{self.task_name}/{self.split_name}] missing on disk: "
+                        f"{original_filepath}  "
+                        f"(tried {len(candidates)} candidate path"
+                        f"{'s' if len(candidates) != 1 else ''})"
                     )
-                    if os.path.exists(candidate_td):
-                        filepath = candidate_td
-
-            # Handle the paths from the metadata file
-            if os.path.exists(original_filepath):
-                # If the original path exists as-is, use it directly
-                filepath = original_filepath
-            elif original_filepath.startswith('E:/'):
-                # Handle paths that start with the specific Windows drive path
-                # Extract the relative path after potential prefixes
-                relative_parts = []
-                path_parts = original_filepath.replace('\\', '/').split('/')
-                
-                # Try to find the task name in the path to extract relevant parts
-                for i, part in enumerate(path_parts):
-                    if part.lower() == self.task_name.lower() or part.lower() == self.task_name.replace('_', '').lower():
-                        relative_parts = path_parts[i:]
-                        break
-                
-                if relative_parts:
-                    # Construct path based on whether we're using root as task dir
-                    if using_root_as_task_dir:
-                        filepath = os.path.join(self.dataset_root, *relative_parts)
-                    else:
-                        filepath = os.path.join(self.dataset_root, 'tasks', *relative_parts)
-                else:
-                    # Try with the last parts of the path (after the last 'CSI100Hz' if it exists)
-                    for i, part in enumerate(path_parts):
-                        if part == 'CSI100Hz':
-                            relative_parts = path_parts[i+1:]
-                            break
-                    
-                    if relative_parts:
-                        if using_root_as_task_dir:
-                            filepath = os.path.join(self.dataset_root, *relative_parts)
-                        else:
-                            filepath = os.path.join(self.dataset_root, 'tasks', self.task_name, *relative_parts)
-                    else:
-                        # Last resort: try to find path segments like sub_X/user_Y/act_Z
-                        try_sub_user_path = False
-                        for i, part in enumerate(path_parts):
-                            if part.startswith('sub_') and i+1 < len(path_parts) and path_parts[i+1].startswith('user_'):
-                                relative_parts = path_parts[i:]
-                                try_sub_user_path = True
-                                break
-                        
-                        if try_sub_user_path:
-                            if using_root_as_task_dir:
-                                filepath = os.path.join(self.dataset_root, *relative_parts)
-                            else:
-                                filepath = os.path.join(self.dataset_root, 'tasks', self.task_name, *relative_parts)
-                        else:
-                            # Try just the filename
-                            filename = os.path.basename(original_filepath)
-                            if using_root_as_task_dir:
-                                filepath = os.path.join(self.dataset_root, filename)
-                            else:
-                                filepath = os.path.join(self.dataset_root, 'tasks', self.task_name, filename)
-            elif not os.path.isabs(filepath):
-                # Handle relative paths based on whether we're using root as task dir
-                if using_root_as_task_dir:
-                    # When using root as task dir, use paths directly
-                    # Case 1: Path includes 'tasks/TaskName/...'
-                    if filepath.startswith('/tasks/') or filepath.startswith('tasks/') or filepath.startswith('tasks\\'):
-                        filepath = os.path.join(self.dataset_root, filepath)
-                    # Case 2: Path is just 'TaskName/...' or contains TaskName directory
-                    elif filepath.startswith(f"{self.task_name}/") or filepath.startswith(f"{self.task_name}\\"):
-                        # In this case, we might need to omit the task name in the path
-                        # Extract the path parts after the task name
-                        path_parts = filepath.replace('\\', '/').split('/')
-                        if path_parts[0] == self.task_name:
-                            filepath = os.path.join(self.dataset_root, *path_parts[1:])
-                        else:
-                            filepath = os.path.join(self.dataset_root, filepath)
-                    # Case 3: Path is relative to dataset root
-                    else:
-                        filepath = os.path.join(self.dataset_root, filepath)
-                else:
-                    # Original behavior when not using root as task dir
-                    # Case 1: Path includes 'tasks/TaskName/...'
-                    if filepath.startswith('/tasks/') or filepath.startswith('tasks/') or filepath.startswith('tasks\\'):
-                        filepath = os.path.join(self.dataset_root, filepath)
-                    # Case 2: Path is just 'TaskName/...'
-                    elif filepath.startswith(f"{self.task_name}/") or filepath.startswith(f"{self.task_name}\\"):
-                        filepath = os.path.join(self.dataset_root, 'tasks', filepath)
-                    # Case 3: Path is relative to task directory
-                    else:
-                        filepath = os.path.join(self.dataset_root, 'tasks', self.task_name, filepath)
-            
-            # Check if file exists
-            if not os.path.exists(filepath):
-                # Try alternative constructions if file not found
-                alt_paths = []
-                
-                # Alternative 1: Try joining directly
-                alt1 = os.path.join(self.dataset_root, original_filepath)
-                alt_paths.append(("Direct join", alt1))
-                
-                # Alternative 2: Try with 'tasks' prefix if not using root as task dir
-                if not using_root_as_task_dir and 'tasks' not in original_filepath:
-                    alt2 = os.path.join(self.dataset_root, 'tasks', original_filepath)
-                    alt_paths.append(("With tasks prefix", alt2))
-                
-                # Alternative 3: Try with task name if not using root as task dir
-                if not using_root_as_task_dir and self.task_name not in original_filepath:
-                    alt3 = os.path.join(self.dataset_root, 'tasks', self.task_name, original_filepath)
-                    alt_paths.append(("Using path segments", alt3))
-                
-                # Alternative 4: Try without tasks directory when using root as task dir
-                if using_root_as_task_dir:
-                    # Look for pattern: /tasks/TaskName/... in filepath and remove those parts
-                    filepath_parts = filepath.replace('\\', '/').split('/')
-                    if 'tasks' in filepath_parts and self.task_name in filepath_parts:
-                        # Find the position of task_name in the path
-                        try:
-                            task_idx = filepath_parts.index(self.task_name)
-                            # If 'tasks' comes right before task_name, eliminate both
-                            if task_idx > 0 and filepath_parts[task_idx-1] == 'tasks':
-                                # Reconstruct path without 'tasks/task_name'
-                                alt4 = os.path.join(self.dataset_root, *filepath_parts[task_idx+1:])
-                                alt_paths.append(("Removing tasks/TaskName prefix", alt4))
-                        except ValueError:
-                            pass
-                
-                # Check alternatives
-                for desc, alt_path in alt_paths:
-                    if os.path.exists(alt_path):
-                        if self.debug:
-                            print(f"Found file using alternative path ({desc}): {alt_path}")
-                        filepath = alt_path
-                        break
-                
-                # If still not found, raise error with detailed information
-                if not os.path.exists(filepath):
-                    error_msg = f"File not found: {filepath}\n"
-                    error_msg += f"Original path from CSV: {original_filepath}\n"
-                    error_msg += f"Dataset root: {self.dataset_root}\n"
-                    error_msg += f"Task directory: {self.task_dir}\n"
-                    error_msg += f"Using root as task dir: {using_root_as_task_dir}\n"
-                    error_msg += "Tried alternative paths:\n"
-                    for desc, alt_path in alt_paths:
-                        error_msg += f"  - {desc}: {alt_path}\n"
-                    
-                    # Additional debug info about directory structure
-                    error_msg += "\nDirectory structure at dataset root:\n"
-                    try:
-                        for item in os.listdir(self.dataset_root):
-                            item_path = os.path.join(self.dataset_root, item)
-                            if os.path.isdir(item_path):
-                                error_msg += f"  Directory: {item}/\n"
-                                # List first few items in subdirectory
-                                try:
-                                    sub_items = os.listdir(item_path)[:5]  # First 5 items
-                                    for sub_item in sub_items:
-                                        error_msg += f"    - {sub_item}\n"
-                                    if len(os.listdir(item_path)) > 5:
-                                        error_msg += f"    - ... ({len(os.listdir(item_path))-5} more items)\n"
-                                except Exception as e:
-                                    error_msg += f"    - Error listing contents: {e}\n"
-                            else:
-                                error_msg += f"  File: {item}\n"
-                    except Exception as e:
-                        error_msg += f"  Error listing directory: {e}\n"
-                    
-                    raise FileNotFoundError(error_msg)
+                    if self._missing_seen == self._MISSING_LOG_CAP:
+                        print(
+                            f"[{self.task_name}/{self.split_name}] "
+                            f"further missing-file warnings suppressed for "
+                            f"this worker (will silently return None)."
+                        )
+                return None
             
             # Load data based on file format
             if self.file_format == "npy":

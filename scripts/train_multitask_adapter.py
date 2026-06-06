@@ -197,6 +197,22 @@ def main():
         
         print(f"Using test splits for task {task}: {test_splits_to_use[task]}")
 
+    # The benchmark dataset returns ``None`` for samples whose underlying
+    # H5 file is missing on disk; without this collate_fn the default one
+    # would crash on ``None`` batches.  Fall back to zero-filled tensors of
+    # the correct shape when an entire batch was filtered out so the model
+    # forward pass still gets valid input.
+    def custom_collate_fn(batch):
+        batch = [item for item in batch if item is not None]
+        if len(batch) == 0:
+            win_len = args.win_len if args.win_len is not None else 500
+            feature_size = args.feature_size if args.feature_size is not None else 232
+            return (
+                torch.zeros(0, 1, win_len, feature_size),
+                torch.zeros(0, dtype=torch.long),
+            )
+        return torch.utils.data.dataloader.default_collate(batch)
+
     # Prepare loaders
     train_loaders, val_loaders, test_loaders = {}, {}, {}
     task_classes = {}
@@ -216,6 +232,7 @@ def main():
             test_splits=test_splits_to_use[task],
             use_root_as_task_dir=args.use_root_data_path,
             pin_memory=pin_memory,
+            collate_fn=custom_collate_fn,
             debug=args.debug
         )
         ld = data['loaders']
