@@ -243,6 +243,56 @@ def run_command(cmd, display_output=True, timeout=1800):
         
         return -1, error_msg
 
+def _supervised_run_completed(output_dir, task, model, seed):
+    """Return True if a previous successful supervised run exists for
+    ``(task, model, seed)`` under ``output_dir``.
+
+    ``run_supervised_direct`` only writes ``supervised_config.json`` after the
+    child process exits with code 0, so its presence (with a matching ``seed``)
+    is a reliable completion marker.
+    """
+    model_dir = os.path.join(output_dir, task, model)
+    if not os.path.isdir(model_dir):
+        return False
+    for entry in os.listdir(model_dir):
+        cfg_path = os.path.join(model_dir, entry, "supervised_config.json")
+        if not os.path.isfile(cfg_path):
+            continue
+        try:
+            with open(cfg_path, 'r') as f:
+                saved_cfg = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if int(saved_cfg.get('seed', -1)) == int(seed):
+            return True
+    return False
+
+
+def _multitask_run_completed(output_dir, model, seed):
+    """Return True if a previous successful multitask run exists for
+    ``(model, seed)`` under ``output_dir``.
+
+    ``run_multitask_direct`` only writes ``multitask_config.json`` after a
+    return code of 0, so its presence (with a matching ``seed``) is a reliable
+    completion marker.
+    """
+    model_dir = os.path.join(output_dir, "multitask", model)
+    if not os.path.isdir(model_dir):
+        return False
+    for entry in os.listdir(model_dir):
+        cfg_path = os.path.join(model_dir, entry, "multitask_config.json")
+        if not os.path.isfile(cfg_path):
+            continue
+        try:
+            with open(cfg_path, 'r') as f:
+                saved_cfg = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if int(saved_cfg.get('seed', -1)) == int(seed):
+            return True
+    return False
+
+
 def get_supervised_config(custom_config=None):
     """
     Get configuration for supervised learning pipeline.
@@ -621,11 +671,19 @@ def main():
     parser.add_argument('--config_file', '--config', dest='config_file',
                         type=str, default=DEFAULT_CONFIG_PATH,
                         help='JSON configuration file for all settings')
-    
+    parser.add_argument('--skip-existing', '--skip_existing',
+                        dest='skip_existing', action='store_true',
+                        help='Skip (task, model, seed) combinations that already '
+                             'have a completed run on disk (detected via the '
+                             '*_config.json marker written on success).')
+
     args = parser.parse_args()
-    
+
     # Load configuration from file
     config = load_config(args.config_file)
+
+    # CLI flag wins, but allow the config to opt in as well.
+    skip_existing = bool(args.skip_existing or config.get('skip_existing', False))
     
     # Extract pipeline type from configuration
     pipeline = config.get('pipeline')
@@ -678,6 +736,28 @@ def main():
                     key = f"multitask/{model}/seed{seed}"
                 else:
                     key = f"{task}/{model}/seed{seed}"
+
+                # Optional resume: skip combinations that already have a
+                # completed run on disk (detected via the success-only
+                # ``*_config.json`` marker written by ``run_*_direct``).
+                if skip_existing:
+                    if pipeline == 'multitask':
+                        already_done = _multitask_run_completed(
+                            config['output_dir'], model, seed)
+                    else:
+                        already_done = _supervised_run_completed(
+                            config['output_dir'], task, model, seed)
+                    if already_done:
+                        print(f"\n{'='*60}")
+                        print(f"[skip-existing] {key} already completed; skipping.")
+                        print(f"{'='*60}\n")
+                        results[key] = {
+                            'status': 'SKIPPED',
+                            'return_code': 0,
+                            'run_time': 0.0,
+                        }
+                        continue
+
                 print(f"\n{'='*60}")
                 print(f"Starting training: {key}")
                 print(f"{'='*60}\n")
@@ -719,16 +799,21 @@ def main():
 
     successful = 0
     failed = 0
+    skipped = 0
     for key, result in results.items():
         status = result['status']
         run_time = result['run_time']
         print(f"  - {key}: {status}, time: {run_time/60:.2f} min")
         if status == 'SUCCESS':
             successful += 1
+        elif status == 'SKIPPED':
+            skipped += 1
         else:
             failed += 1
 
-    print(f"\nSuccessful: {successful}/{len(results)}, Failed: {failed}/{len(results)}")
+    total = len(results)
+    print(f"\nSuccessful: {successful}/{total}, Skipped: {skipped}/{total}, "
+          f"Failed: {failed}/{total}")
     return 0 if failed == 0 else 1
 
 if __name__ == "__main__":

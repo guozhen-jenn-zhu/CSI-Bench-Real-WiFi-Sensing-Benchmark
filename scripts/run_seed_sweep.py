@@ -62,6 +62,10 @@ def main() -> int:
                     help="Comma-separated list of seeds (default: 42)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print the per-seed commands without launching them")
+    ap.add_argument("--skip-existing", "--skip_existing",
+                    dest="skip_existing", action="store_true",
+                    help="Resume an interrupted sweep: skip (task, model, seed) "
+                         "combinations whose results already exist on disk.")
     ap.add_argument("--extra-arg", action="append", default=[],
                     help="Pass-through args appended to the local_runner call. "
                          "May be repeated, e.g. --extra-arg=--debug")
@@ -93,7 +97,10 @@ def main() -> int:
         sys.executable,
         str(LOCAL_RUNNER),
         "--config", str(tmp_cfg),
-    ] + list(args.extra_arg)
+    ]
+    if args.skip_existing:
+        cmd.append("--skip-existing")
+    cmd += list(args.extra_arg)
 
     print(f"\n[run_seed_sweep] launching: {' '.join(cmd)}\n")
     if args.dry_run:
