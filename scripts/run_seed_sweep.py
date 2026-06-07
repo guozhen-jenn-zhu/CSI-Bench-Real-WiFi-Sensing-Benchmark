@@ -66,6 +66,14 @@ def main() -> int:
                     dest="skip_existing", action="store_true",
                     help="Resume an interrupted sweep: skip (task, model, seed) "
                          "combinations whose results already exist on disk.")
+    ap.add_argument("--num-gpus", "--num_gpus", dest="num_gpus", default=None,
+                    help="Run sweep jobs in parallel across this many GPUs "
+                         "(``auto`` = use torch.cuda.device_count()). "
+                         "Each concurrent job is pinned to its own GPU via "
+                         "CUDA_VISIBLE_DEVICES. Default: sequential.")
+    ap.add_argument("--jobs-per-gpu", "--jobs_per_gpu",
+                    dest="jobs_per_gpu", type=int, default=None,
+                    help="How many concurrent jobs per GPU (default 1).")
     ap.add_argument("--extra-arg", action="append", default=[],
                     help="Pass-through args appended to the local_runner call. "
                          "May be repeated, e.g. --extra-arg=--debug")
@@ -100,6 +108,10 @@ def main() -> int:
     ]
     if args.skip_existing:
         cmd.append("--skip-existing")
+    if args.num_gpus is not None:
+        cmd += ["--num-gpus", str(args.num_gpus)]
+    if args.jobs_per_gpu is not None:
+        cmd += ["--jobs-per-gpu", str(args.jobs_per_gpu)]
     cmd += list(args.extra_arg)
 
     print(f"\n[run_seed_sweep] launching: {' '.join(cmd)}\n")

@@ -23,6 +23,9 @@ Additional parameters:
 import os
 import sys
 import subprocess
+import threading
+import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import time
 import argparse
@@ -425,7 +428,67 @@ def get_multitask_config(custom_config=None):
     
     return config
 
-def run_supervised_direct(config):
+# Thread-safe lock for parent-process stdout when running jobs in parallel.
+_PRINT_LOCK = threading.Lock()
+
+
+def _safe_print(msg):
+    """Print ``msg`` atomically across worker threads."""
+    with _PRINT_LOCK:
+        print(msg, flush=True)
+
+
+def _execute_training_subprocess(cmd, env=None, log_file=None, line_prefix=None):
+    """Run ``cmd`` in a subprocess and stream/capture its output.
+
+    Args:
+        cmd: shell command string (executed with ``shell=True``).
+        env: optional environment dict (e.g. with ``CUDA_VISIBLE_DEVICES`` set).
+            If ``None`` the parent process's environment is inherited.
+        log_file: if provided, the subprocess output is written to this path
+            (one line per readline) and *not* streamed to the parent's stdout.
+            If ``None``, output is streamed to stdout exactly like before.
+        line_prefix: optional string prepended to each line we print to stdout
+            (useful to disambiguate concurrent jobs, e.g. ``"[gpu 2] "``).
+
+    Returns:
+        ``(return_code, experiment_id_or_None)`` -- ``experiment_id`` is parsed
+        from the first ``"Experiment ID:"`` line in the child's output.
+    """
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+        shell=True,
+        env=env,
+    )
+
+    experiment_id = None
+    log_fh = open(log_file, 'w') if log_file else None
+    try:
+        for line in iter(process.stdout.readline, ""):
+            if log_fh is not None:
+                log_fh.write(line)
+                log_fh.flush()
+            else:
+                if line_prefix:
+                    # Preserve trailing newline if present
+                    sys.stdout.write(line_prefix + line)
+                else:
+                    sys.stdout.write(line)
+                sys.stdout.flush()
+            if experiment_id is None and "Experiment ID:" in line:
+                experiment_id = line.split("Experiment ID:")[1].strip()
+    finally:
+        if log_fh is not None:
+            log_fh.close()
+
+    return_code = process.wait()
+    return return_code, experiment_id
+
+
+def run_supervised_direct(config, env=None, log_file=None, line_prefix=None):
     """
     Run supervised learning pipeline directly.
     
@@ -489,50 +552,32 @@ def run_supervised_direct(config):
             cmd += f" --{key}={value}"
     
     # Run command and capture output
-    print(f"Running supervised learning: {cmd}")
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        shell=True
+    _safe_print(f"Running supervised learning: {cmd}")
+    return_code, experiment_id = _execute_training_subprocess(
+        cmd, env=env, log_file=log_file, line_prefix=line_prefix,
     )
-    
-    # Track experiment_id
-    experiment_id = None
-    for line in iter(process.stdout.readline, ""):
-        print(line, end="")
-        # Parse experiment_id from output
-        if "Experiment ID:" in line:
-            experiment_id = line.split("Experiment ID:")[1].strip()
-    
-    return_code = process.wait()
-    
+
     if return_code != 0:
-        print(f"Error running supervised learning: return code {return_code}")
+        _safe_print(f"Error running supervised learning: return code {return_code}")
     else:
-        print("Supervised learning completed successfully.")
-        
+        _safe_print("Supervised learning completed successfully.")
+
         # If experiment_id was successfully obtained, save configuration directly to experiment directory
         if experiment_id:
             exp_dir = os.path.join(base_output_dir, task_name, model_name, experiment_id)
             config_filename = os.path.join(exp_dir, "supervised_config.json")
-            
+
             try:
-                # Ensure directory exists
                 os.makedirs(exp_dir, exist_ok=True)
-                
-                # Save configuration file
                 with open(config_filename, 'w') as f:
                     json.dump(config, f, indent=2)
-                
-                print(f"Configuration saved to model directory: {config_filename}")
+                _safe_print(f"Configuration saved to model directory: {config_filename}")
             except Exception as e:
-                print(f"Error saving configuration file: {str(e)}")
-    
+                _safe_print(f"Error saving configuration file: {str(e)}")
+
     return return_code
 
-def run_multitask_direct(config):
+def run_multitask_direct(config, env=None, log_file=None, line_prefix=None):
     """
     Run multitask learning pipeline.
     
@@ -619,47 +664,29 @@ def run_multitask_direct(config):
         cmd += f" --test_splits={quoted_test_splits}"
     
     # Run command and capture output
-    print(f"Running command: {cmd}")
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        shell=True
+    _safe_print(f"Running command: {cmd}")
+    return_code, experiment_id = _execute_training_subprocess(
+        cmd, env=env, log_file=log_file, line_prefix=line_prefix,
     )
-    
-    # Track experiment_id
-    experiment_id = None
-    for line in iter(process.stdout.readline, ""):
-        print(line, end="")
-        # Parse experiment_id from output
-        if "Experiment ID:" in line:
-            experiment_id = line.split("Experiment ID:")[1].strip()
-    
-    return_code = process.wait()
-    
+
     if return_code != 0:
-        print(f"Error running multitask learning: return code {return_code}")
+        _safe_print(f"Error running multitask learning: return code {return_code}")
     else:
-        print("Multitask learning completed successfully.")
-        
+        _safe_print("Multitask learning completed successfully.")
+
         # If experiment_id was successfully obtained, save configuration directly to experiment directory
         if experiment_id:
             exp_dir = os.path.join(base_output_dir, task_name, model_name, experiment_id)
             config_filename = os.path.join(exp_dir, "multitask_config.json")
-            
+
             try:
-                # Ensure directory exists
                 os.makedirs(exp_dir, exist_ok=True)
-                
-                # Save configuration file
                 with open(config_filename, 'w') as f:
                     json.dump(config, f, indent=2)
-                
-                print(f"Configuration saved to model directory: {config_filename}")
+                _safe_print(f"Configuration saved to model directory: {config_filename}")
             except Exception as e:
-                print(f"Error saving configuration file: {str(e)}")
-    
+                _safe_print(f"Error saving configuration file: {str(e)}")
+
     return return_code
 
 def main():
@@ -676,6 +703,19 @@ def main():
                         help='Skip (task, model, seed) combinations that already '
                              'have a completed run on disk (detected via the '
                              '*_config.json marker written on success).')
+    parser.add_argument('--num-gpus', '--num_gpus',
+                        dest='num_gpus', type=str, default='auto',
+                        help='How many GPUs to dispatch sweep jobs across. '
+                             "Use ``auto`` (default) to detect via "
+                             '``torch.cuda.device_count()``, an integer to cap '
+                             'the count, or ``0``/``1`` to disable parallelism. '
+                             'Each running job is pinned to a unique GPU via '
+                             '``CUDA_VISIBLE_DEVICES``.')
+    parser.add_argument('--jobs-per-gpu', '--jobs_per_gpu',
+                        dest='jobs_per_gpu', type=int, default=1,
+                        help='How many concurrent jobs to run *per* GPU '
+                             '(default: 1). Increase only if a single run does '
+                             'not saturate one GPU.')
 
     args = parser.parse_args()
 
@@ -684,6 +724,27 @@ def main():
 
     # CLI flag wins, but allow the config to opt in as well.
     skip_existing = bool(args.skip_existing or config.get('skip_existing', False))
+
+    # Resolve the requested GPU count.  ``auto`` -> torch.cuda.device_count().
+    num_gpus_arg = str(args.num_gpus).strip().lower()
+    if num_gpus_arg == 'auto':
+        requested_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    else:
+        try:
+            requested_gpus = int(num_gpus_arg)
+        except ValueError:
+            print(f"Error: --num-gpus must be 'auto' or an integer, got {args.num_gpus!r}")
+            return 1
+    available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if requested_gpus > available_gpus:
+        print(f"Warning: requested {requested_gpus} GPUs but only {available_gpus} "
+              "are visible; clamping.")
+        requested_gpus = available_gpus
+    requested_gpus = max(0, requested_gpus)
+    jobs_per_gpu = max(1, int(args.jobs_per_gpu))
+    # ``max_workers`` controls parent-side parallelism.  0 GPUs (CPU box) still
+    # runs sequentially.
+    max_workers = max(1, requested_gpus * jobs_per_gpu) if requested_gpus > 0 else 1
     
     # Extract pipeline type from configuration
     pipeline = config.get('pipeline')
@@ -729,6 +790,9 @@ def main():
     # Record results across (task, model, seed)
     results = {}
 
+    # First pass: build the full list of pending jobs (applying --skip-existing
+    # up front so the dispatcher only sees real work).
+    jobs = []  # list of dicts: {key, task, model, seed, pipeline_config}
     for task in task_list:
         for model in available_models:
             for seed in seeds:
@@ -748,19 +812,13 @@ def main():
                         already_done = _supervised_run_completed(
                             config['output_dir'], task, model, seed)
                     if already_done:
-                        print(f"\n{'='*60}")
                         print(f"[skip-existing] {key} already completed; skipping.")
-                        print(f"{'='*60}\n")
                         results[key] = {
                             'status': 'SKIPPED',
                             'return_code': 0,
                             'run_time': 0.0,
                         }
                         continue
-
-                print(f"\n{'='*60}")
-                print(f"Starting training: {key}")
-                print(f"{'='*60}\n")
 
                 # Create a new config copy for each (task, model, seed)
                 run_config = config.copy()
@@ -775,21 +833,104 @@ def main():
                 else:
                     pipeline_config = get_supervised_config(run_config)
 
-                # Run appropriate pipeline
-                start_time = time.time()
-                if pipeline == 'multitask':
-                    return_code = run_multitask_direct(pipeline_config)
-                else:
-                    return_code = run_supervised_direct(pipeline_config)
-                end_time = time.time()
+                jobs.append({
+                    'key': key,
+                    'task': task,
+                    'model': model,
+                    'seed': seed,
+                    'pipeline_config': pipeline_config,
+                })
 
-                results[key] = {
-                    'status': 'SUCCESS' if return_code == 0 else 'FAILED',
-                    'return_code': return_code,
-                    'run_time': end_time - start_time,
-                }
-                print(f"\n{key}: {'OK' if return_code == 0 else 'FAILED'} "
-                      f"({(end_time - start_time)/60:.2f} min)")
+    print(f"\n{'='*60}")
+    print(f"Dispatching {len(jobs)} job(s) across {requested_gpus} GPU(s) "
+          f"(jobs_per_gpu={jobs_per_gpu}, max_workers={max_workers})")
+    print(f"{'='*60}\n")
+
+    def _run_one(job, gpu_id=None):
+        """Run a single job, optionally pinned to ``gpu_id`` (CUDA_VISIBLE_DEVICES)."""
+        key = job['key']
+        pipeline_config = job['pipeline_config']
+
+        if gpu_id is not None:
+            env = os.environ.copy()
+            env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+            line_prefix = f"[gpu {gpu_id} {key}] "
+            # Stream per-job output to a log file so concurrent jobs don't
+            # interleave on stdout.  Logs live alongside the per-run results.
+            log_dir = os.path.join(config['output_dir'], '_sweep_logs')
+            os.makedirs(log_dir, exist_ok=True)
+            safe_key = key.replace('/', '__')
+            log_file = os.path.join(
+                log_dir,
+                f"{safe_key}_gpu{gpu_id}_{int(time.time())}.log",
+            )
+            _safe_print(f"[gpu {gpu_id}] starting {key} -> {log_file}")
+        else:
+            env = None
+            line_prefix = None
+            log_file = None
+            _safe_print(f"\n{'='*60}\nStarting training: {key}\n{'='*60}\n")
+
+        start_time = time.time()
+        if pipeline == 'multitask':
+            return_code = run_multitask_direct(
+                pipeline_config, env=env, log_file=log_file, line_prefix=line_prefix,
+            )
+        else:
+            return_code = run_supervised_direct(
+                pipeline_config, env=env, log_file=log_file, line_prefix=line_prefix,
+            )
+        end_time = time.time()
+
+        result = {
+            'status': 'SUCCESS' if return_code == 0 else 'FAILED',
+            'return_code': return_code,
+            'run_time': end_time - start_time,
+        }
+        if gpu_id is not None:
+            _safe_print(
+                f"[gpu {gpu_id}] finished {key}: "
+                f"{'OK' if return_code == 0 else 'FAILED'} "
+                f"({(end_time - start_time)/60:.2f} min)"
+            )
+        else:
+            _safe_print(
+                f"\n{key}: {'OK' if return_code == 0 else 'FAILED'} "
+                f"({(end_time - start_time)/60:.2f} min)"
+            )
+        return key, result
+
+    # Dispatch the jobs.  Sequential code path when max_workers == 1 so single-
+    # GPU users (and CPU users) see unchanged streaming output.
+    if max_workers <= 1 or not jobs:
+        for job in jobs:
+            key, result = _run_one(job, gpu_id=None)
+            results[key] = result
+    else:
+        # GPU slot pool: each worker grabs a free GPU id, runs its job, returns
+        # the id.  This guarantees no two concurrent jobs land on the same GPU
+        # (subject to ``jobs_per_gpu``).
+        gpu_slots = queue.Queue()
+        for g in range(requested_gpus):
+            for _ in range(jobs_per_gpu):
+                gpu_slots.put(g)
+
+        def _worker(job):
+            gpu_id = gpu_slots.get()
+            try:
+                return _run_one(job, gpu_id=gpu_id)
+            finally:
+                gpu_slots.put(gpu_id)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_worker, j) for j in jobs]
+            for fut in as_completed(futures):
+                try:
+                    key, result = fut.result()
+                except Exception as exc:
+                    _safe_print(f"[scheduler] worker raised: {exc}")
+                    continue
+                results[key] = result
 
     # Print summary of all runs
     print(f"\n{'='*60}")
