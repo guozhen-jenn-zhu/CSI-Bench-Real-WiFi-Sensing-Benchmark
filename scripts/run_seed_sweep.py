@@ -26,30 +26,24 @@ Examples::
     python scripts/run_seed_sweep.py \
         --config configs/csi_bench_multitask_config.json
 
-    # 4-GPU box (e.g. g5.12xlarge / g6.12xlarge), resumable, robust to
-    # terminal disconnect and SageMaker idle-shutdown:
+    # Resume an interrupted sweep, sequential (default = 1 GPU, one job at
+    # a time -- safest, matches the original runner's behavior):
     #
-    #   * --num-gpus 4        : one concurrent job per GPU
-    #   * --skip-existing     : skip combos that already finished
-    #   * tmux/nohup wrapping : process survives ssh/SSM disconnect
-    #   * tee + redirect      : full sweep log is captured to disk
-    #
-    # Inside a tmux/screen session (recommended):
-    #
-    #     tmux new -s sweep
-    #     python scripts/run_seed_sweep.py \
-    #         --config configs/csi_bench_local_config.json \
-    #         --num-gpus 4 --skip-existing \
-    #         2>&1 | tee -a results/csi_bench/sweep.log
-    #
-    # Or fully detached via nohup (no tmux needed):
-    #
+    #     mkdir -p results/csi_bench
     #     nohup python -u scripts/run_seed_sweep.py \
     #         --config configs/csi_bench_local_config.json \
-    #         --num-gpus 4 --skip-existing \
+    #         --skip-existing \
     #         > results/csi_bench/sweep.log 2>&1 &
     #     disown
-    #     tail -f results/csi_bench/sweep.log
+    #     tail -F results/csi_bench/sweep.log
+    #
+    # Multi-GPU (opt-in): each concurrent job is pinned to its own GPU via
+    # CUDA_VISIBLE_DEVICES.  Only enable this once you've verified a single
+    # task trains end-to-end on the sequential path.
+    #
+    #     python scripts/run_seed_sweep.py \
+    #         --config configs/csi_bench_local_config.json \
+    #         --num-gpus 4 --skip-existing
 """
 from __future__ import annotations
 

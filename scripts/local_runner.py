@@ -789,13 +789,15 @@ def main():
                              'have a completed run on disk (detected via the '
                              '*_config.json marker written on success).')
     parser.add_argument('--num-gpus', '--num_gpus',
-                        dest='num_gpus', type=str, default='auto',
+                        dest='num_gpus', type=str, default='1',
                         help='How many GPUs to dispatch sweep jobs across. '
-                             "Use ``auto`` (default) to detect via "
-                             '``torch.cuda.device_count()``, an integer to cap '
-                             'the count, or ``0``/``1`` to disable parallelism. '
-                             'Each running job is pinned to a unique GPU via '
-                             '``CUDA_VISIBLE_DEVICES``.')
+                             "Default is ``1`` (sequential, one job at a time "
+                             "on cuda:0) -- same behavior as the original "
+                             "runner.  Pass ``auto`` to detect via "
+                             '``torch.cuda.device_count()`` or an integer to '
+                             'opt into parallel multi-GPU sweeps; each '
+                             'concurrent job is then pinned to its own GPU '
+                             'via ``CUDA_VISIBLE_DEVICES``.')
     parser.add_argument('--jobs-per-gpu', '--jobs_per_gpu',
                         dest='jobs_per_gpu', type=int, default=1,
                         help='How many concurrent jobs to run *per* GPU '
@@ -1015,13 +1017,15 @@ def main():
             )
         return key, result
 
-    # Start a parent-side heartbeat thread so the sweep is never silent for
-    # more than ``heartbeat_interval`` seconds.  This both surfaces progress
-    # to whoever is watching stdout AND keeps SageMaker (and other
-    # idle-shutdown watchdogs) from killing the instance during long runs.
+    # Start a parent-side heartbeat thread when we're running in parallel
+    # mode (sequential mode already streams full child output to stdout, so a
+    # heartbeat would just be noise).  In parallel mode the parent is otherwise
+    # silent for hours, so the heartbeat both surfaces progress AND keeps
+    # SageMaker (and other idle-shutdown watchdogs) from killing the instance.
     hb_stop = threading.Event()
     hb_thread = None
-    if args.heartbeat_interval and args.heartbeat_interval > 0 and jobs:
+    if (max_workers > 1 and args.heartbeat_interval
+            and args.heartbeat_interval > 0 and jobs):
         hb_thread = threading.Thread(
             target=_heartbeat_loop,
             args=(hb_stop, args.heartbeat_interval, status),
