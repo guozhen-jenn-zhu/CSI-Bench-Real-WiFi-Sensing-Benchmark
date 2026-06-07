@@ -468,10 +468,11 @@ def _heartbeat_loop(stop_event, interval, status):
 
         {
             'start_time': float,           # seconds since epoch
-            'total': int,                  # total jobs in this sweep
+            'total': int,                  # full sweep size (pending + pre-skipped)
+            'pending': int,                # jobs we actually dispatch this invocation
             'running': dict[str, dict],    # key -> {'gpu_id': int, 'log_file': str, 'started': float}
-            'done': int,                   # finished (success or failure)
-            'skipped': int,                # already-done runs skipped via --skip-existing
+            'finished': int,               # naturally finished this invocation (success or failure)
+            'skipped': int,                # pre-skipped via --skip-existing
         }
     """
     if interval <= 0:
@@ -482,14 +483,15 @@ def _heartbeat_loop(stop_event, interval, status):
             hrs, rem = divmod(int(elapsed), 3600)
             mins = rem // 60
             running = list(status['running'].items())
-            done = status['done']
+            finished = status['finished']
             skipped = status['skipped']
+            pending = status['pending']
             total = status['total']
-            queued = max(0, total - done - len(running))
+            queued = max(0, pending - finished - len(running))
             print(
                 f"[heartbeat T+{hrs}h{mins:02d}m] "
-                f"running={len(running)} done={done} skipped={skipped} "
-                f"queued={queued} total={total}",
+                f"running={len(running)} finished={finished} queued={queued} "
+                f"(of {pending} pending; skipped={skipped}, total={total})",
                 flush=True,
             )
             for key, info in running:
@@ -601,9 +603,13 @@ def run_supervised_direct(config, env=None, log_file=None, line_prefix=None):
     cmd += f" --feature_size={config.get('feature_size')}"
     cmd += f" --save_dir={quoted_output_dir}"
     cmd += f" --output_dir={quoted_output_dir}"
-    
-    # Disable distributed training and CPU optimization
-    cmd += " --num_workers=0"
+
+    # DataLoader workers.  Respect the config (defaults to 0 only when unset,
+    # which matches the historical behavior).  With multiple sweep jobs on the
+    # same box, ``num_workers=0`` is a severe I/O bottleneck -- each job hits
+    # the disk single-threadedly and starves its GPU.
+    num_workers = int(config.get('num_workers', 0))
+    cmd += f" --num_workers={num_workers}"
     cmd += " --use_root_data_path"  # Flag parameter without value
     
     # Disable pin_memory to resolve MPS warnings
@@ -710,8 +716,10 @@ def run_multitask_direct(config, env=None, log_file=None, line_prefix=None):
     quoted_output_dir = f'"{base_output_dir}"'
     cmd += f" --save_dir={quoted_output_dir}"
 
-    # Disable distributed training and CPU optimization
-    cmd += " --num_workers=0"
+    # DataLoader workers -- respect the config (see comment in
+    # ``run_supervised_direct``).
+    num_workers = int(config.get('num_workers', 0))
+    cmd += f" --num_workers={num_workers}"
     cmd += " --use_root_data_path"  # Flag parameter without value
     
     # Disable pin_memory to resolve MPS warnings
@@ -932,12 +940,14 @@ def main():
 
     # Shared status used by the heartbeat thread.  Mutations happen under
     # ``_PRINT_LOCK`` so the heartbeat sees a consistent snapshot.
+    pre_skipped = sum(1 for r in results.values() if r.get('status') == 'SKIPPED')
     status = {
         'start_time': time.time(),
-        'total': len(jobs),
-        'running': {},          # key -> {'gpu_id', 'log_file', 'started'}
-        'done': len(results),   # any pre-counted SKIPPED entries
-        'skipped': sum(1 for r in results.values() if r.get('status') == 'SKIPPED'),
+        'total': len(jobs) + pre_skipped,   # full sweep size
+        'pending': len(jobs),               # actual jobs to run this invocation
+        'running': {},                      # key -> {'gpu_id', 'log_file', 'started'}
+        'finished': 0,                      # naturally finished this invocation
+        'skipped': pre_skipped,
     }
 
     def _run_one(job, gpu_id=None):
@@ -984,7 +994,7 @@ def main():
         finally:
             with _PRINT_LOCK:
                 status['running'].pop(key, None)
-                status['done'] += 1
+                status['finished'] += 1
         end_time = time.time()
 
         result = {
