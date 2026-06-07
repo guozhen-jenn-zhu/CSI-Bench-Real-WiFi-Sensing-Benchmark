@@ -25,6 +25,31 @@ Examples::
     # Multi-task adapter (Tab. 4 Transformer-only)
     python scripts/run_seed_sweep.py \
         --config configs/csi_bench_multitask_config.json
+
+    # 4-GPU box (e.g. g5.12xlarge / g6.12xlarge), resumable, robust to
+    # terminal disconnect and SageMaker idle-shutdown:
+    #
+    #   * --num-gpus 4        : one concurrent job per GPU
+    #   * --skip-existing     : skip combos that already finished
+    #   * tmux/nohup wrapping : process survives ssh/SSM disconnect
+    #   * tee + redirect      : full sweep log is captured to disk
+    #
+    # Inside a tmux/screen session (recommended):
+    #
+    #     tmux new -s sweep
+    #     python scripts/run_seed_sweep.py \
+    #         --config configs/csi_bench_local_config.json \
+    #         --num-gpus 4 --skip-existing \
+    #         2>&1 | tee -a results/csi_bench/sweep.log
+    #
+    # Or fully detached via nohup (no tmux needed):
+    #
+    #     nohup python -u scripts/run_seed_sweep.py \
+    #         --config configs/csi_bench_local_config.json \
+    #         --num-gpus 4 --skip-existing \
+    #         > results/csi_bench/sweep.log 2>&1 &
+    #     disown
+    #     tail -f results/csi_bench/sweep.log
 """
 from __future__ import annotations
 
@@ -74,6 +99,12 @@ def main() -> int:
     ap.add_argument("--jobs-per-gpu", "--jobs_per_gpu",
                     dest="jobs_per_gpu", type=int, default=None,
                     help="How many concurrent jobs per GPU (default 1).")
+    ap.add_argument("--heartbeat-interval", "--heartbeat_interval",
+                    dest="heartbeat_interval", type=int, default=None,
+                    help="Seconds between parent-side heartbeat lines that "
+                         "show running/done/queued jobs and tail per-job logs. "
+                         "Default 300 (5 min). Set to 0 to disable. Helps "
+                         "prevent SageMaker idle-shutdown of the instance.")
     ap.add_argument("--extra-arg", action="append", default=[],
                     help="Pass-through args appended to the local_runner call. "
                          "May be repeated, e.g. --extra-arg=--debug")
@@ -112,6 +143,8 @@ def main() -> int:
         cmd += ["--num-gpus", str(args.num_gpus)]
     if args.jobs_per_gpu is not None:
         cmd += ["--jobs-per-gpu", str(args.jobs_per_gpu)]
+    if args.heartbeat_interval is not None:
+        cmd += ["--heartbeat-interval", str(args.heartbeat_interval)]
     cmd += list(args.extra_arg)
 
     print(f"\n[run_seed_sweep] launching: {' '.join(cmd)}\n")

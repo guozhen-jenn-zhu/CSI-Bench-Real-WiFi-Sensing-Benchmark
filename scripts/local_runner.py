@@ -438,6 +438,72 @@ def _safe_print(msg):
         print(msg, flush=True)
 
 
+def _tail_log(path, max_chars=400):
+    """Return the last non-empty line of ``path`` (or empty string on error)."""
+    try:
+        with open(path, 'rb') as f:
+            try:
+                f.seek(-max_chars, os.SEEK_END)
+            except OSError:
+                f.seek(0)
+            tail = f.read().decode('utf-8', errors='replace')
+        for line in reversed(tail.splitlines()):
+            line = line.strip()
+            if line:
+                return line
+    except (OSError, ValueError):
+        pass
+    return ''
+
+
+def _heartbeat_loop(stop_event, interval, status):
+    """Periodically print a parent-side heartbeat with job progress.
+
+    Designed for SageMaker / long-running boxes: the parent process never goes
+    silent for more than ``interval`` seconds, which (a) makes progress
+    visible without waiting for a job to finish and (b) keeps idle-shutdown
+    watchdogs from killing the instance.
+
+    ``status`` is a dict managed under ``_PRINT_LOCK``::
+
+        {
+            'start_time': float,           # seconds since epoch
+            'total': int,                  # total jobs in this sweep
+            'running': dict[str, dict],    # key -> {'gpu_id': int, 'log_file': str, 'started': float}
+            'done': int,                   # finished (success or failure)
+            'skipped': int,                # already-done runs skipped via --skip-existing
+        }
+    """
+    if interval <= 0:
+        return
+    while not stop_event.wait(interval):
+        with _PRINT_LOCK:
+            elapsed = time.time() - status['start_time']
+            hrs, rem = divmod(int(elapsed), 3600)
+            mins = rem // 60
+            running = list(status['running'].items())
+            done = status['done']
+            skipped = status['skipped']
+            total = status['total']
+            queued = max(0, total - done - len(running))
+            print(
+                f"[heartbeat T+{hrs}h{mins:02d}m] "
+                f"running={len(running)} done={done} skipped={skipped} "
+                f"queued={queued} total={total}",
+                flush=True,
+            )
+            for key, info in running:
+                run_for = int(time.time() - info['started'])
+                rh, rrem = divmod(run_for, 3600)
+                rm = rrem // 60
+                tail = _tail_log(info['log_file']) if info.get('log_file') else ''
+                tail_disp = f" :: {tail}" if tail else ''
+                print(
+                    f"  - [gpu {info['gpu_id']}] {key}  (running {rh}h{rm:02d}m){tail_disp}",
+                    flush=True,
+                )
+
+
 def _execute_training_subprocess(cmd, env=None, log_file=None, line_prefix=None):
     """Run ``cmd`` in a subprocess and stream/capture its output.
 
@@ -455,6 +521,16 @@ def _execute_training_subprocess(cmd, env=None, log_file=None, line_prefix=None)
         ``(return_code, experiment_id_or_None)`` -- ``experiment_id`` is parsed
         from the first ``"Experiment ID:"`` line in the child's output.
     """
+    # Always force unbuffered stdout in the child python.  Without this,
+    # ``print()`` in the training script is block-buffered (Python's default
+    # when stdout is a pipe), so the per-job log file looks frozen for tens of
+    # KB at a time and ``tail -f`` is useless.
+    if env is None:
+        env = os.environ.copy()
+    else:
+        env = dict(env)
+    env.setdefault('PYTHONUNBUFFERED', '1')
+
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -462,6 +538,7 @@ def _execute_training_subprocess(cmd, env=None, log_file=None, line_prefix=None)
         universal_newlines=True,
         shell=True,
         env=env,
+        bufsize=1,  # line-buffered on the parent side as well
     )
 
     experiment_id = None
@@ -716,6 +793,12 @@ def main():
                         help='How many concurrent jobs to run *per* GPU '
                              '(default: 1). Increase only if a single run does '
                              'not saturate one GPU.')
+    parser.add_argument('--heartbeat-interval', '--heartbeat_interval',
+                        dest='heartbeat_interval', type=int, default=300,
+                        help='Seconds between parent-side heartbeat lines that '
+                             'show running/done/queued and tail the per-job '
+                             'logs. Set to 0 to disable. Default: 300 (5 min). '
+                             'Helps prevent SageMaker idle-shutdown.')
 
     args = parser.parse_args()
 
@@ -843,8 +926,19 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"Dispatching {len(jobs)} job(s) across {requested_gpus} GPU(s) "
-          f"(jobs_per_gpu={jobs_per_gpu}, max_workers={max_workers})")
+          f"(jobs_per_gpu={jobs_per_gpu}, max_workers={max_workers}, "
+          f"heartbeat={args.heartbeat_interval}s)")
     print(f"{'='*60}\n")
+
+    # Shared status used by the heartbeat thread.  Mutations happen under
+    # ``_PRINT_LOCK`` so the heartbeat sees a consistent snapshot.
+    status = {
+        'start_time': time.time(),
+        'total': len(jobs),
+        'running': {},          # key -> {'gpu_id', 'log_file', 'started'}
+        'done': len(results),   # any pre-counted SKIPPED entries
+        'skipped': sum(1 for r in results.values() if r.get('status') == 'SKIPPED'),
+    }
 
     def _run_one(job, gpu_id=None):
         """Run a single job, optionally pinned to ``gpu_id`` (CUDA_VISIBLE_DEVICES)."""
@@ -872,14 +966,25 @@ def main():
             _safe_print(f"\n{'='*60}\nStarting training: {key}\n{'='*60}\n")
 
         start_time = time.time()
-        if pipeline == 'multitask':
-            return_code = run_multitask_direct(
-                pipeline_config, env=env, log_file=log_file, line_prefix=line_prefix,
-            )
-        else:
-            return_code = run_supervised_direct(
-                pipeline_config, env=env, log_file=log_file, line_prefix=line_prefix,
-            )
+        with _PRINT_LOCK:
+            status['running'][key] = {
+                'gpu_id': gpu_id if gpu_id is not None else -1,
+                'log_file': log_file,
+                'started': start_time,
+            }
+        try:
+            if pipeline == 'multitask':
+                return_code = run_multitask_direct(
+                    pipeline_config, env=env, log_file=log_file, line_prefix=line_prefix,
+                )
+            else:
+                return_code = run_supervised_direct(
+                    pipeline_config, env=env, log_file=log_file, line_prefix=line_prefix,
+                )
+        finally:
+            with _PRINT_LOCK:
+                status['running'].pop(key, None)
+                status['done'] += 1
         end_time = time.time()
 
         result = {
@@ -900,37 +1005,56 @@ def main():
             )
         return key, result
 
-    # Dispatch the jobs.  Sequential code path when max_workers == 1 so single-
-    # GPU users (and CPU users) see unchanged streaming output.
-    if max_workers <= 1 or not jobs:
-        for job in jobs:
-            key, result = _run_one(job, gpu_id=None)
-            results[key] = result
-    else:
-        # GPU slot pool: each worker grabs a free GPU id, runs its job, returns
-        # the id.  This guarantees no two concurrent jobs land on the same GPU
-        # (subject to ``jobs_per_gpu``).
-        gpu_slots = queue.Queue()
-        for g in range(requested_gpus):
-            for _ in range(jobs_per_gpu):
-                gpu_slots.put(g)
+    # Start a parent-side heartbeat thread so the sweep is never silent for
+    # more than ``heartbeat_interval`` seconds.  This both surfaces progress
+    # to whoever is watching stdout AND keeps SageMaker (and other
+    # idle-shutdown watchdogs) from killing the instance during long runs.
+    hb_stop = threading.Event()
+    hb_thread = None
+    if args.heartbeat_interval and args.heartbeat_interval > 0 and jobs:
+        hb_thread = threading.Thread(
+            target=_heartbeat_loop,
+            args=(hb_stop, args.heartbeat_interval, status),
+            daemon=True,
+        )
+        hb_thread.start()
 
-        def _worker(job):
-            gpu_id = gpu_slots.get()
-            try:
-                return _run_one(job, gpu_id=gpu_id)
-            finally:
-                gpu_slots.put(gpu_id)
-
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(_worker, j) for j in jobs]
-            for fut in as_completed(futures):
-                try:
-                    key, result = fut.result()
-                except Exception as exc:
-                    _safe_print(f"[scheduler] worker raised: {exc}")
-                    continue
+    try:
+        # Dispatch the jobs.  Sequential code path when max_workers == 1 so single-
+        # GPU users (and CPU users) see unchanged streaming output.
+        if max_workers <= 1 or not jobs:
+            for job in jobs:
+                key, result = _run_one(job, gpu_id=None)
                 results[key] = result
+        else:
+            # GPU slot pool: each worker grabs a free GPU id, runs its job,
+            # returns the id.  This guarantees no two concurrent jobs land on
+            # the same GPU (subject to ``jobs_per_gpu``).
+            gpu_slots = queue.Queue()
+            for g in range(requested_gpus):
+                for _ in range(jobs_per_gpu):
+                    gpu_slots.put(g)
+
+            def _worker(job):
+                gpu_id = gpu_slots.get()
+                try:
+                    return _run_one(job, gpu_id=gpu_id)
+                finally:
+                    gpu_slots.put(gpu_id)
+
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = [ex.submit(_worker, j) for j in jobs]
+                for fut in as_completed(futures):
+                    try:
+                        key, result = fut.result()
+                    except Exception as exc:
+                        _safe_print(f"[scheduler] worker raised: {exc}")
+                        continue
+                    results[key] = result
+    finally:
+        hb_stop.set()
+        if hb_thread is not None:
+            hb_thread.join(timeout=2.0)
 
     # Print summary of all runs
     print(f"\n{'='*60}")
