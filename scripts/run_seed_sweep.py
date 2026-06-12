@@ -79,6 +79,13 @@ def main() -> int:
                     help="Path to one of configs/csi_bench_{local,multitask}_config.json")
     ap.add_argument("--seeds", default="42",
                     help="Comma-separated list of seeds (default: 42)")
+    ap.add_argument("--tasks", default=None,
+                    help="Comma-separated override for available_tasks (supervised) "
+                         "or tasks (multitask).  When omitted, the sweep follows the "
+                         "config file as written.")
+    ap.add_argument("--models", default=None,
+                    help="Comma-separated override for available_models. "
+                         "When omitted, the sweep follows the config file as written.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print the per-seed commands without launching them")
     ap.add_argument("--skip-existing", "--skip_existing",
@@ -114,17 +121,31 @@ def main() -> int:
     # iterate over (task, model, seed) on its own.  Written to a system temp
     # directory so we don't pollute the repo's ``configs/`` folder.
     materialised = _make_per_seed_config(base_cfg, seeds)
+
+    if args.tasks:
+        task_override = [t.strip() for t in args.tasks.split(",") if t.strip()]
+        if materialised.get("pipeline") == "multitask":
+            materialised["tasks"] = task_override
+        else:
+            materialised["available_tasks"] = task_override
+            materialised["task"] = task_override[0]
+    if args.models:
+        model_override = [m.strip() for m in args.models.split(",") if m.strip()]
+        materialised["available_models"] = model_override
+        if materialised.get("pipeline") == "multitask":
+            materialised["model"] = model_override[0]
+
     tmp_dir = Path(tempfile.mkdtemp(prefix="csi_bench_sweep_"))
     tmp_cfg = tmp_dir / f"{cfg_path.stem}_seeds{'-'.join(str(s) for s in seeds)}.json"
     tmp_cfg.write_text(json.dumps(materialised, indent=2))
     print(f"[run_seed_sweep] wrote materialized sweep config -> {tmp_cfg}")
     print(f"[run_seed_sweep] seeds: {seeds}")
-    if base_cfg.get("pipeline") == "multitask":
-        print(f"[run_seed_sweep] multitask tasks: {base_cfg.get('tasks')}")
+    if materialised.get("pipeline") == "multitask":
+        print(f"[run_seed_sweep] multitask tasks: {materialised.get('tasks')}")
     else:
         print(f"[run_seed_sweep] supervised tasks: "
-              f"{base_cfg.get('available_tasks') or [base_cfg.get('task')]}")
-    print(f"[run_seed_sweep] models: {base_cfg.get('available_models')}")
+              f"{materialised.get('available_tasks') or [materialised.get('task')]}")
+    print(f"[run_seed_sweep] models: {materialised.get('available_models')}")
 
     cmd = [
         sys.executable,

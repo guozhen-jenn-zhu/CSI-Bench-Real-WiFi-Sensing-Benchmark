@@ -399,7 +399,58 @@ python scripts/run_seed_sweep.py --config configs/csi_bench_local_config.json
 python scripts/run_seed_sweep.py --config configs/csi_bench_multitask_config.json
 ```
 
-### Phase F — three-seed sweep (optional, opt-in)
+### Phase F — three-seed sweep for mean ± std (recommended for paper-style reporting)
+
+Phase F runs every (task, model) combination across **three seeds {42, 43, 44}** so the aggregator can report `mean ± std`.  It is split into three sub-sweeps so we don't have to retrain combinations that are already complete on disk:
+
+```mermaid
+flowchart LR
+  A["Sweep A: HAR/UID/Prox baselines<br/>(3 tasks x 3 models x 3 seeds = 27 runs)"] --> R[(results/csi_bench)]
+  B["Sweep B: FD/BD/Loc/MSR extra seeds<br/>(4 tasks x 7 models x 2 new seeds = 56 runs)"] --> R
+  C["Sweep C: Multitask extra seeds<br/>(3 backbones x 2 new seeds = 6 runs)"] --> M[(results/csi_bench_multitask)]
+```
+
+All three commands use `--skip-existing`, so anything already saved on disk (for example the seed-42 FD/BD/Loc/MSR results) is detected and not rerun.  Each command is safe to re-launch if interrupted.
+
+```bash
+# Sweep A -- single-task supervised baselines for HumanActivityRecognition /
+# HumanIdentification / ProximityRecognition.  These fill the Tab. 3 rows for the
+# multitask sub-tasks and the single-task column of Tab. 4.
+nohup python -u scripts/run_seed_sweep.py \
+    --config configs/csi_bench_multitask_baselines_config.json \
+    --seeds 42,43,44 --skip-existing --num-gpus 4 \
+    > results/csi_bench/sweep_A_multitask_baselines.log 2>&1 &
+disown
+
+# Sweep B -- add seeds 43, 44 to the four primary single-task sweeps
+# (FallDetection, BreathingDetection, Localization, MotionSourceRecognition).
+nohup python -u scripts/run_seed_sweep.py \
+    --config configs/csi_bench_local_config.json \
+    --tasks "FallDetection,BreathingDetection,Localization,MotionSourceRecognition" \
+    --seeds 42,43,44 --skip-existing --num-gpus 4 \
+    > results/csi_bench/sweep_B_primary_seeds.log 2>&1 &
+disown
+
+# Sweep C -- add seeds 43, 44 to the multitask LoRA pipeline for all three
+# supported backbones (transformer, patchtst, timesformer1d).
+nohup python -u scripts/run_seed_sweep.py \
+    --config configs/csi_bench_multitask_config.json \
+    --models "transformer,patchtst,timesformer1d" \
+    --seeds 42,43,44 --skip-existing --num-gpus 4 \
+    > results/csi_bench_multitask/sweep_C_multitask_seeds.log 2>&1 &
+disown
+```
+
+The `--tasks` / `--models` flags on `run_seed_sweep.py` override `available_tasks` / `available_models` from the JSON config so you don't need to edit configs/ to sub-select a sweep.
+
+Once everything finishes, optionally sync results back to S3:
+
+```bash
+aws s3 sync ./results/csi_bench/           s3://rnd-sagemaker/CSI-Bench/Results/Experiments/csi_bench/
+aws s3 sync ./results/csi_bench_multitask/ s3://rnd-sagemaker/CSI-Bench/Results/Experiments/csi_bench_multitask/
+```
+
+If you only need the simple full sweep (no sub-selection, may rerun completed combinations):
 
 ```bash
 python scripts/run_seed_sweep.py --config configs/csi_bench_local_config.json     --seeds 42,43,44
@@ -417,11 +468,11 @@ python result_analysis/all_result_summary.py \
   --multitask-results-dir ./results/csi_bench_multitask \
   --output-dir result_analysis/csi_bench_new
 
-# Three seeds (Phase F)
+# Three seeds (Phase F, mean +/- std)
 python result_analysis/all_result_summary.py \
   --results-dir ./results/csi_bench \
   --multitask-results-dir ./results/csi_bench_multitask \
-  --output-dir result_analysis/csi_bench_new_3seeds \
+  --output-dir result_analysis/csi_bench_3seeds \
   --seeds 42,43,44
 ```
 
