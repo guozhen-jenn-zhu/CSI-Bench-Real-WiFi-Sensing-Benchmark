@@ -388,7 +388,7 @@ def get_multitask_config(custom_config=None):
         'training_dir': custom_config['training_dir'],
         'output_dir': custom_config['output_dir'],
         'results_subdir': f"{custom_config['model']}_multitask",
-        
+
         # Training parameters
         'batch_size': custom_config['batch_size'],
         'learning_rate': custom_config.get('learning_rate', 5e-4),
@@ -396,15 +396,38 @@ def get_multitask_config(custom_config=None):
         'epochs': custom_config['epochs'],
         'win_len': custom_config['win_len'],
         'feature_size': custom_config['feature_size'],
-        
+
         # Model parameters
         'model': custom_config['model'],
         'emb_dim': custom_config.get('emb_dim', 128),
         'dropout': custom_config.get('dropout', 0.1),
-        
+
         # Task parameters
         'task': custom_config['task'],  # 'multitask' for directory structure
         'tasks': custom_config['tasks'],
+
+        # Seed -- MUST be forwarded so multi-seed sweeps actually use distinct
+        # seeds.  Without this every sweep iteration silently re-runs seed 42.
+        'seed': int(custom_config.get('seed', 42)),
+
+        # LoRA adapter hyperparameters.  ``train_multitask_adapter.py`` has
+        # defaults but the paper config overrides them, so forward whatever
+        # the user supplied.
+        'lora_r': custom_config.get('lora_r', 8),
+        'lora_alpha': custom_config.get('lora_alpha', 32),
+        'lora_dropout': custom_config.get('lora_dropout', 0.05),
+
+        # Early-stopping patience -- multitask trainer defaults to 10; the
+        # paper config uses 15.
+        'patience': custom_config.get('patience', 15),
+
+        # Test splits to evaluate on (e.g. 'test_id,test_cross_device,...').
+        'test_splits': custom_config.get('test_splits', 'all'),
+
+        # DataLoader / I/O knobs.
+        'num_workers': custom_config.get('num_workers', 0),
+        'data_key': custom_config.get('data_key', 'CSI_amps'),
+        'file_format': custom_config.get('file_format', 'h5'),
     }
     
     # If transformer_config.json exists, try to load it
@@ -670,6 +693,23 @@ def run_multitask_direct(config, env=None, log_file=None, line_prefix=None):
     Returns:
         Return code (0 for success, non-zero for failure)
     """
+    # Preflight: ``train_multitask_adapter.py`` indirectly imports ``peft``
+    # via ``model/multitask/models.py``.  When ``peft`` is missing every
+    # subprocess crashes in ~2s with a bare ``return code 1`` and no useful
+    # message in the per-job log.  Surface a clear, actionable error here
+    # before launching the subprocess.
+    try:
+        import importlib
+        importlib.import_module('peft')
+    except ImportError:
+        _safe_print(
+            "ERROR: the multitask pipeline requires the 'peft' package "
+            "(see README -> 'Phase F').  Install it with:\n"
+            "    pip install peft\n"
+            "Aborting multitask run."
+        )
+        return 1
+
     print("Running multitask learning with the following configuration:")
     for key, value in config.items():
         print(f"  {key}: {value}")
@@ -735,7 +775,8 @@ def run_multitask_direct(config, env=None, log_file=None, line_prefix=None):
         # If model_params doesn't exist, handle individual parameters.
         # ``train_multitask_adapter.py`` uses ``--lr``; if config supplies
         # ``learning_rate`` we map it to ``--lr``.
-        for param in ['lr', 'emb_dim', 'dropout', 'patience', 'data_key', 'seed',
+        for param in ['lr', 'emb_dim', 'dropout', 'patience', 'data_key',
+                      'file_format', 'seed',
                       'lora_r', 'lora_alpha', 'lora_dropout']:
             if param in config:
                 cmd += f" --{param}={config[param]}"
