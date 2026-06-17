@@ -845,7 +845,7 @@ def main():
                              '(default: 1). Increase only if a single run does '
                              'not saturate one GPU.')
     parser.add_argument('--heartbeat-interval', '--heartbeat_interval',
-                        dest='heartbeat_interval', type=int, default=300,
+                        dest='heartbeat_interval', type=int, default=60,
                         help='Seconds between parent-side heartbeat lines that '
                              'show running/done/queued and tail the per-job '
                              'logs. Set to 0 to disable. Default: 300 (5 min). '
@@ -1058,15 +1058,18 @@ def main():
             )
         return key, result
 
-    # Start a parent-side heartbeat thread when we're running in parallel
-    # mode (sequential mode already streams full child output to stdout, so a
-    # heartbeat would just be noise).  In parallel mode the parent is otherwise
-    # silent for hours, so the heartbeat both surfaces progress AND keeps
-    # SageMaker (and other idle-shutdown watchdogs) from killing the instance.
+    # Start a parent-side heartbeat thread so the parent process never goes
+    # silent for more than ``heartbeat_interval`` seconds.  This keeps
+    # SageMaker (and other idle-shutdown watchdogs) from killing the box
+    # during long training steps, AND surfaces per-job progress.
+    #
+    # We enable it for BOTH sequential and parallel modes: even in sequential
+    # mode the child can produce silent stretches (e.g. an epoch that runs
+    # for several minutes without flushing stdout), which is enough to trip
+    # an aggressive idle watchdog.
     hb_stop = threading.Event()
     hb_thread = None
-    if (max_workers > 1 and args.heartbeat_interval
-            and args.heartbeat_interval > 0 and jobs):
+    if (args.heartbeat_interval and args.heartbeat_interval > 0 and jobs):
         hb_thread = threading.Thread(
             target=_heartbeat_loop,
             args=(hb_stop, args.heartbeat_interval, status),

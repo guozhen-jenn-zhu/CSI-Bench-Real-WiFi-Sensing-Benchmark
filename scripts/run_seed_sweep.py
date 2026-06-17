@@ -104,8 +104,9 @@ def main() -> int:
                     dest="heartbeat_interval", type=int, default=None,
                     help="Seconds between parent-side heartbeat lines that "
                          "show running/done/queued jobs and tail per-job logs. "
-                         "Default 300 (5 min). Set to 0 to disable. Helps "
-                         "prevent SageMaker idle-shutdown of the instance.")
+                         "Default 60s (matches local_runner.py). Set to 0 to "
+                         "disable. Helps prevent SageMaker / Studio idle "
+                         "shutdown of the instance.")
     ap.add_argument("--extra-arg", action="append", default=[],
                     help="Pass-through args appended to the local_runner call. "
                          "May be repeated, e.g. --extra-arg=--debug")
