@@ -8,7 +8,7 @@ A comprehensive benchmark and training system for WiFi sensing using CSI data. A
 
 This repository provides a unified framework for training and evaluating deep learning models on WiFi Channel State Information (CSI) data for various sensing tasks. The framework supports both local execution and cloud-based training on AWS SageMaker.
 
-As we have recently fixed some data issues and updated the dataset, we rerun the experiments. Please find the updated results in RESULTS.md.
+**Notice:** The CSI-Bench dataset and codebase have recently been updated to address previously identified data issues and to reflect important improvements. All benchmark experiments have been re-run using the latest release (Kaggle Version 12). For fully up-to-date reproduction results—including 3-seed statistics for every main table—please refer to [RESULTS.md](RESULTS.md).
 
 ## Installation and Setup
 
