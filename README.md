@@ -8,6 +8,8 @@ A comprehensive benchmark and training system for WiFi sensing using CSI data. A
 
 This repository provides a unified framework for training and evaluating deep learning models on WiFi Channel State Information (CSI) data for various sensing tasks. The framework supports both local execution and cloud-based training on AWS SageMaker.
 
+As we have recently fixed some data issues and updated the dataset, we rerun the experiments. Please find the updated results in RESULTS.md.
+
 ## Installation and Setup
 
 ### Prerequisites
@@ -43,12 +45,7 @@ This repository provides a unified framework for training and evaluating deep le
 
 3. Data Download:
 
-   Please find the [CSI-Bench dataset](https://www.kaggle.com/datasets/guozhenjennzhu/csi-bench) hosted on Kaggle, or pull it directly from our S3 bucket:
-
-   ```bash
-   # Recommended: mirror the whole dataset to ~/Data/CSI-Bench/ on your g5.12xlarge
-   aws s3 sync s3://rnd-sagemaker/Data/fm_downstream/CSI-Bench/ ~/Data/CSI-Bench/
-   ```
+   Download the [CSI-Bench dataset](https://www.kaggle.com/datasets/guozhenjennzhu/csi-bench) from Kaggle and extract it to `~/Data/CSI-Bench/` (or any other location — point `training_dir` in the configs at it).
 
    The updated CSI-Bench layout no longer uses the legacy `tasks/` prefix.  Single-task datasets live directly under the root and the three multi-task sub-tasks share a `Multitask/` parent directory (so each per-task metadata can reference `../../sub_Human_h5/...`):
 
@@ -286,7 +283,7 @@ Multi-task learning uses LoRA (Low-Rank Adaptation) technology to enable efficie
 
 ## SageMaker Integration
 
-The repository provides robust support for scaling CSI-Bench training on AWS SageMaker.  The default ready-made config (`configs/csi_bench_sagemaker_config.json`) targets `ml.g5.12xlarge` instances and the new S3 layout at `s3://rnd-sagemaker/Data/fm_downstream/CSI-Bench/` — no `tasks/` prefix.
+The repository provides robust support for scaling CSI-Bench training on AWS SageMaker.  The default ready-made config (`configs/csi_bench_sagemaker_config.json`) targets `ml.g5.12xlarge` instances and the standard CSI-Bench S3 layout (see [Data Structure on S3](#data-structure-on-s3)).
 
 ### Configuration
 
@@ -295,8 +292,8 @@ Edit `configs/csi_bench_sagemaker_config.json` to set your S3 paths and training
 ```json
 {
   "pipeline": "supervised",
-  "s3_data_base": "s3://rnd-sagemaker/Data/fm_downstream/CSI-Bench/",
-  "s3_output_base": "s3://rnd-sagemaker/CSI-Bench-Results/",
+  "s3_data_base": "s3://YOUR-BUCKET/CSI-Bench/",
+  "s3_output_base": "s3://YOUR-BUCKET/CSI-Bench-Results/",
   "win_len": 500,
   "feature_size": 232,
   "batch_size": 128,
@@ -373,102 +370,27 @@ Results and model artifacts will be stored in the S3 output location you specifi
 
 ## Reproducing the CSI-Bench paper
 
-The repo ships three preconfigured configs and a sweep helper that reproduce every table in the NeurIPS 2025 paper (Tab. 3, 4, 8-14) on a `ml.g5.12xlarge` instance against the updated dataset at `s3://rnd-sagemaker/Data/fm_downstream/CSI-Bench/` (or its local mirror `~/Data/CSI-Bench/`).
+> 3-seed `mean ± std` numbers for every paper table are documented in [RESULTS.md](RESULTS.md).
 
-### One-time setup
-
-```bash
-# 1) Mirror the dataset locally on the g5.12xlarge (~78 GiB)
-aws s3 sync s3://rnd-sagemaker/Data/fm_downstream/CSI-Bench/ ~/Data/CSI-Bench/
-
-# 2) Install dependencies and (only for multi-task LoRA) install peft
-pip install -r requirements.txt
-pip install peft
-
-# 3) (one-time) regenerate the 4-class MotionSourceRecognition mapping if needed
-python util/build_msr_label_mapping.py --verify
-```
-
-### Phase E — single-seed sweep (default deliverable)
+### Setup
 
 ```bash
-# Supervised single-task (Tab. 3 + difficulty tables Tab. 8/9/10/11):
-python scripts/run_seed_sweep.py --config configs/csi_bench_local_config.json
-
-# Multi-task adapter (Tab. 4 multi-task vs single-task) and OOD tables (Tab. 12/13/14):
-python scripts/run_seed_sweep.py --config configs/csi_bench_multitask_config.json
+pip install -r requirements.txt && pip install peft
+python util/build_msr_label_mapping.py --verify   # one-time, MSR 4-class mapping
 ```
 
-### Phase F — three-seed sweep for mean ± std (recommended for paper-style reporting)
+(Download the dataset from Kaggle first — see the [Data Download](#installation-and-setup) section.)
 
-Phase F runs every (task, model) combination across **three seeds {42, 43, 44}** so the aggregator can report `mean ± std`.  It is split into three sub-sweeps so we don't have to retrain combinations that are already complete on disk:
-
-```mermaid
-flowchart LR
-  A["Sweep A: HAR/UID/Prox baselines<br/>(3 tasks x 3 models x 3 seeds = 27 runs)"] --> R[(results/csi_bench)]
-  B["Sweep B: FD/BD/Loc/MSR extra seeds<br/>(4 tasks x 7 models x 2 new seeds = 56 runs)"] --> R
-  C["Sweep C: Multitask extra seeds<br/>(3 backbones x 2 new seeds = 6 runs)"] --> M[(results/csi_bench_multitask)]
-```
-
-All three commands use `--skip-existing`, so anything already saved on disk (for example the seed-42 FD/BD/Loc/MSR results) is detected and not rerun.  Each command is safe to re-launch if interrupted.
+### Sweep (3 seeds)
 
 ```bash
-# Sweep A -- single-task supervised baselines for HumanActivityRecognition /
-# HumanIdentification / ProximityRecognition.  These fill the Tab. 3 rows for the
-# multitask sub-tasks and the single-task column of Tab. 4.
-nohup python -u scripts/run_seed_sweep.py \
-    --config configs/csi_bench_multitask_baselines_config.json \
-    --seeds 42,43,44 --skip-existing --num-gpus 4 \
-    > results/csi_bench/sweep_A_multitask_baselines.log 2>&1 &
-disown
-
-# Sweep B -- add seeds 43, 44 to the four primary single-task sweeps
-# (FallDetection, BreathingDetection, Localization, MotionSourceRecognition).
-nohup python -u scripts/run_seed_sweep.py \
-    --config configs/csi_bench_local_config.json \
-    --tasks "FallDetection,BreathingDetection,Localization,MotionSourceRecognition" \
-    --seeds 42,43,44 --skip-existing --num-gpus 4 \
-    > results/csi_bench/sweep_B_primary_seeds.log 2>&1 &
-disown
-
-# Sweep C -- add seeds 43, 44 to the multitask LoRA pipeline for all three
-# supported backbones (transformer, patchtst, timesformer1d).
-nohup python -u scripts/run_seed_sweep.py \
-    --config configs/csi_bench_multitask_config.json \
-    --models "transformer,patchtst,timesformer1d" \
-    --seeds 42,43,44 --skip-existing --num-gpus 4 \
-    > results/csi_bench_multitask/sweep_C_multitask_seeds.log 2>&1 &
-disown
+python scripts/run_seed_sweep.py --config configs/csi_bench_local_config.json     --seeds 42,43,44 --skip-existing
+python scripts/run_seed_sweep.py --config configs/csi_bench_multitask_config.json --seeds 42,43,44 --skip-existing
 ```
 
-The `--tasks` / `--models` flags on `run_seed_sweep.py` override `available_tasks` / `available_models` from the JSON config so you don't need to edit configs/ to sub-select a sweep.
-
-Once everything finishes, optionally sync results back to S3:
+### Aggregate
 
 ```bash
-aws s3 sync ./results/csi_bench/           s3://rnd-sagemaker/CSI-Bench/Results/Experiments/csi_bench/
-aws s3 sync ./results/csi_bench_multitask/ s3://rnd-sagemaker/CSI-Bench/Results/Experiments/csi_bench_multitask/
-```
-
-If you only need the simple full sweep (no sub-selection, may rerun completed combinations):
-
-```bash
-python scripts/run_seed_sweep.py --config configs/csi_bench_local_config.json     --seeds 42,43,44
-python scripts/run_seed_sweep.py --config configs/csi_bench_multitask_config.json --seeds 42,43,44
-```
-
-### Aggregating results into paper tables
-
-`result_analysis/all_result_summary.py` walks the results directory and emits the paper-style CSV tables.  Pass `--seeds 42` (default) for single-seed reporting or `--seeds 42,43,44` for the mean ± std format used in the paper.
-
-```bash
-# Single-seed (Phase E)
-python result_analysis/all_result_summary.py \
-  --results-dir ./results/csi_bench \
-  --multitask-results-dir ./results/csi_bench_multitask \
-  --output-dir result_analysis/csi_bench_new
-
-# Three seeds (Phase F, mean +/- std)
 python result_analysis/all_result_summary.py \
   --results-dir ./results/csi_bench \
   --multitask-results-dir ./results/csi_bench_multitask \

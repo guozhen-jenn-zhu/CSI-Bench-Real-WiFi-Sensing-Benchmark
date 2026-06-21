@@ -19,3 +19,6 @@ result/
 result_analysis/.DS_Store
 .DS_Store
 /result_analysis/.ipynb_checkpoints
+
+# Staging output of util/build_*.py / add_cfreq_* scripts
+util/_*_artifacts/
