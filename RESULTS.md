@@ -1,4 +1,4 @@
-# CSI-Bench reproduction results — Phase F (3-seed mean ± std)
+# CSI-Bench reproduction results
 
 This document captures the full set of paper-table results reproduced on the [CSI-Bench dataset](https://www.kaggle.com/datasets/guozhenjennzhu/csi-bench).  All cells are reported as `mean ± std` over **seeds {42, 43, 44}** wherever the experiment was run for all three seeds; cells that show a single value are seed-42 only (see the [Coverage](#coverage) section for the per-cell breakdown).
 
