@@ -25,14 +25,16 @@ warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
 
 # Import model classes from models.py
 from model.supervised.models import (
-    MLPClassifier, 
-    LSTMClassifier, 
-    ResNet18Classifier, 
-    TransformerClassifier, 
+    MLPClassifier,
+    LSTMClassifier,
+    ResNet18Classifier,
+    TransformerClassifier,
     ViTClassifier,
     PatchTST,
     TimesFormer1D
 )
+from model.supervised.pruned_attention_gru import PrunedAttentionGRUClassifier
+from model.supervised.newmodel import NewModel
 
 # Import TaskTrainer
 from engine.supervised.task_trainer import TaskTrainer
@@ -48,7 +50,9 @@ MODEL_TYPES = {
     'transformer': TransformerClassifier,
     'vit': ViTClassifier,
     'patchtst': PatchTST,
-    'timesformer1d': TimesFormer1D
+    'timesformer1d': TimesFormer1D,
+    'pruned_attention_gru': PrunedAttentionGRUClassifier,
+    'newmodel': NewModel,
 }
 
 def main(args=None):
@@ -59,7 +63,7 @@ def main(args=None):
         parser.add_argument('--task_name', type=str, default='MotionSourceRecognition',
                             help='Name of the task to train on')
         parser.add_argument('--model', type=str, default='vit', 
-                            choices=['mlp', 'lstm', 'resnet18', 'transformer', 'vit', 'patchtst', 'timesformer1d'],
+                            choices=['mlp', 'lstm', 'resnet18', 'transformer', 'vit', 'patchtst', 'timesformer1d', 'pruned_attention_gru', 'newmodel'],
                             help='Type of model to train')
         parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
         parser.add_argument('--epochs', type=int, default=30, help='Number of epochs to train')
@@ -109,6 +113,11 @@ def main(args=None):
                             help='Number of transformer layers')
         parser.add_argument('--num_heads', type=int, default=4,
                             help='Number of attention heads')
+        # PrunedAttentionGRU / NewModel parameters
+        parser.add_argument('--hidden_dim', type=int, default=128,
+                            help='Hidden dim for PAG / NewModel')
+        parser.add_argument('--attention_dim', type=int, default=32,
+                            help='Attention dim for PrunedAttentionGRU')
         # Testing specific parameters
         parser.add_argument('--test_splits', type=str, default='all',
                             help='Comma-separated list of test splits to use. If "all", all available test splits will be used. '
@@ -378,7 +387,25 @@ def main(args=None):
             'mlp_ratio': args.mlp_ratio,
             'dropout': args.dropout
         })
-    
+
+    # PrunedAttentionGRU specific parameters
+    if args.model == 'pruned_attention_gru':
+        model_kwargs.update({
+            'feature_size': args.feature_size,
+            'win_len': args.win_len,
+            'hidden_dim': getattr(args, 'hidden_dim', 128),
+            'attention_dim': getattr(args, 'attention_dim', 32),
+        })
+
+    # NewModel specific parameters
+    if args.model == 'newmodel':
+        model_kwargs.update({
+            'feature_size': args.feature_size,
+            'win_len': args.win_len,
+            'hidden_dim': getattr(args, 'hidden_dim', 128),
+            'dropout': args.dropout,
+        })
+
     # Initialize model
     model = ModelClass(**model_kwargs)
     model = model.to(device)

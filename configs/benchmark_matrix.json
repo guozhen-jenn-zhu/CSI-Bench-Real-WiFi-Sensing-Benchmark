@@ -1,0 +1,34 @@
+{
+  "models": ["mlp", "lstm", "resnet18", "transformer", "vit", "pruned_attention_gru", "newmodel"],
+  "csibench_tasks": ["TestTask"],
+  "external_datasets": ["aril", "har_1", "har_3", "signfi", "stanfi"],
+  "seeds": [0, 1, 2],
+  "csibench": {
+    "training_dir": "",
+    "win_len": 500,
+    "feature_size": 232,
+    "batch_size": 8,
+    "epochs": 100,
+    "learning_rate": 5e-4,
+    "weight_decay": 1e-5,
+    "patience": 15
+  },
+  "pag_overrides": {
+    "epochs_pretrain": 80,
+    "epochs_finetune": 20,
+    "learning_rate": 1e-3,
+    "learning_rate_finetune": 1e-4,
+    "mixup_alpha": 1.0,
+    "mixup_prob": 0.7,
+    "prune_method": "std",
+    "prune_s": 0.5,
+    "prune_k": 0.20,
+    "hidden_dim": 128,
+    "attention_dim": 32
+  },
+  "newmodel_overrides": {
+    "hidden_dim": 128,
+    "dropout": 0.1
+  },
+  "output_dir": "./results/benchmark_matrix"
+}

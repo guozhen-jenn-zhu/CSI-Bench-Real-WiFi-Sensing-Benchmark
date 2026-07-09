@@ -1,0 +1,19 @@
+{
+  "pipeline": "supervised",
+  "training_dir": "",
+  "output_dir": "./results",
+  "task": "TestTask",
+  "model": "newmodel",
+  "win_len": 500,
+  "feature_size": 232,
+  "batch_size": 8,
+  "epochs": 100,
+  "learning_rate": 5e-4,
+  "weight_decay": 1e-5,
+  "warmup_epochs": 5,
+  "patience": 15,
+  "hidden_dim": 128,
+  "dropout": 0.1,
+  "seed": 42,
+  "test_splits": "all"
+}
